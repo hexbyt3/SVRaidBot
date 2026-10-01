@@ -47,6 +47,17 @@ namespace SysBot.Tests
             pk.IsShiny.Should().Be(shiny);
         }
 
+        // Star counts from the last release's embeds for the same seeds.
+        [Theory]
+        [InlineData("3739A70B", 0, TeraRaidMapParent.Paldea, 6, 4)]
+        [InlineData("DEADBEEF", 0, TeraRaidMapParent.Paldea, 6, 5)]
+        [InlineData("3739A70B", 1, TeraRaidMapParent.Paldea, 6, 6)]
+        public void StarCountMatchesTheEmbed(string seed, int content, TeraRaidMapParent map, int storyLevel, int stars)
+        {
+            UseGame("Scarlet");
+            RotatingRaidBotSV.GetStarCount(seed, content, map, storyLevel).Should().Be(stars);
+        }
+
         [Fact]
         public void TheSameSeedIsADifferentPokemonInEachGame()
         {

@@ -21,6 +21,40 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
     private readonly ulong _raidBlockPointerKitakami = raidBlockPointerKitakami;
     private readonly ulong _raidBlockPointerBlueberry = raidBlockPointerBlueberry;
 
+    // One number per raid slot across all three maps. Each map gets its whole
+    // block (Paldea 72 slots, Kitakami 100, Blueberry 80) so numbers never
+    // overlap: Paldea 0-71, Kitakami 72-171, Blueberry 172-251.
+    public const int KitakamiStartIndex = (int)RaidBlock.MAX_COUNT_BASE;
+    public const int BlueberryStartIndex = KitakamiStartIndex + (int)RaidBlock.MAX_COUNT_KITAKAMI;
+    public const int TotalSlots = BlueberryStartIndex + (int)RaidBlock.MAX_COUNT_BLUEBERRY;
+
+    // Within each raid entry the seed sits 0x10 bytes in.
+    private const int SeedOffsetInRaid = 0x10;
+
+    public static int ToGlobalIndex(TeraRaidMapParent map, int slot) => map switch
+    {
+        TeraRaidMapParent.Kitakami => KitakamiStartIndex + slot,
+        TeraRaidMapParent.Blueberry => BlueberryStartIndex + slot,
+        _ => slot,
+    };
+
+    public static (TeraRaidMapParent Map, int Slot) FromGlobalIndex(int index)
+    {
+        if (index < 0 || index >= TotalSlots)
+            throw new ArgumentOutOfRangeException(nameof(index), index, "Not a raid slot.");
+        if (index < KitakamiStartIndex)
+            return (TeraRaidMapParent.Paldea, index);
+        if (index < BlueberryStartIndex)
+            return (TeraRaidMapParent.Kitakami, index - KitakamiStartIndex);
+        return (TeraRaidMapParent.Blueberry, index - BlueberryStartIndex);
+    }
+
+    /// <summary>
+    /// Offset of a slot's seed from the start of its map's raid entries
+    /// (the data <see cref="ReadRaidData"/> returns).
+    /// </summary>
+    public static int SeedOffset(int slot) => slot * (int)Raid.SIZE + SeedOffsetInRaid;
+
     /// <summary>
     /// Reads raid data for the specified map region.
     /// </summary>
@@ -53,27 +87,15 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
     /// <returns>The seed value at the specified index, or 0 if the raid is completed</returns>
     public async Task<uint> ReadSeedAtIndex(int index, CancellationToken token)
     {
-        if (index < 69)
+        var (map, slot) = FromGlobalIndex(index);
+        ulong entries = map switch
         {
-            // Paldea
-            var offset = (ulong)(0x20 + index * 0x20);
-            var data = await _connection.ReadBytesAbsoluteAsync(_raidBlockPointerBase + offset, 4, token).ConfigureAwait(false);
-            return BitConverter.ToUInt32(data, 0);
-        }
-        else if (index < 93)
-        {
-            // Kitakami
-            var offset = (ulong)((index - 69) * 0x20);
-            var data = await _connection.ReadBytesAbsoluteAsync(_raidBlockPointerKitakami + 0x10 + offset, 4, token).ConfigureAwait(false);
-            return BitConverter.ToUInt32(data, 0);
-        }
-        else
-        {
-            // Blueberry
-            var offset = (ulong)((index - 93) * 0x20);
-            var data = await _connection.ReadBytesAbsoluteAsync(_raidBlockPointerBlueberry + 0x10 + offset, 4, token).ConfigureAwait(false);
-            return BitConverter.ToUInt32(data, 0);
-        }
+            TeraRaidMapParent.Kitakami => _raidBlockPointerKitakami,
+            TeraRaidMapParent.Blueberry => _raidBlockPointerBlueberry,
+            _ => _raidBlockPointerBase + RaidBlock.HEADER_SIZE,
+        };
+        var data = await _connection.ReadBytesAbsoluteAsync(entries + (ulong)SeedOffset(slot), 4, token).ConfigureAwait(false);
+        return BitConverter.ToUInt32(data, 0);
     }
 
     /// <summary>
@@ -125,30 +147,17 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
     /// <returns>List of longs representing the memory pointer</returns>
     private static List<long> DeterminePointer(int index)
     {
-        const int kitakamiDensCount = 25;
-        int blueberrySubtractValue = kitakamiDensCount == 25 ? 93 : 94;
-
-        if (index < 69)
+        var (map, slot) = FromGlobalIndex(index);
+        var chain = map switch
         {
-            return new List<long>(Offsets.RaidBlockPointerBase.ToArray())
-            {
-                [3] = 0x60 + index * 0x20
-            };
-        }
-        else if (index < 94)
-        {
-            return new List<long>(Offsets.RaidBlockPointerKitakami.ToArray())
-            {
-                [3] = 0xCE8 + ((index - 69) * 0x20)
-            };
-        }
-        else
-        {
-            return new List<long>(Offsets.RaidBlockPointerBlueberry.ToArray())
-            {
-                [3] = 0x1968 + ((index - blueberrySubtractValue) * 0x20)
-            };
-        }
+            TeraRaidMapParent.Kitakami => Offsets.RaidBlockPointerKitakami.ToArray(),
+            TeraRaidMapParent.Blueberry => Offsets.RaidBlockPointerBlueberry.ToArray(),
+            _ => Offsets.RaidBlockPointerBase.ToArray(),
+        };
+        // Paldea's block starts with a header before the raid entries.
+        long entries = chain[^1] + (map == TeraRaidMapParent.Paldea ? RaidBlock.HEADER_SIZE : 0);
+        chain[^1] = entries + SeedOffset(slot);
+        return [.. chain];
     }
 
     /// <summary>

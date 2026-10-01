@@ -49,6 +49,18 @@ namespace SysBot.Tests
             WebRaidRules.CrystalFor(stars, isEvent).Should().Be(expected);
 
         [Theory]
+        [InlineData("Chien-Pao", "ChienPao", true)]
+        [InlineData("Iron Valiant", "IronValiant", true)]
+        [InlineData("ting-lu", "Ting-Lu", true)]
+        [InlineData("Chien-Pao", "Chi-Yu", false)]
+        public void EventNamesMatchHoweverTheyAreWritten(string a, string b, bool same)
+        {
+            EventSpeciesComparer.Instance.Equals(a, b).Should().Be(same);
+            if (same)
+                EventSpeciesComparer.Instance.GetHashCode(a).Should().Be(EventSpeciesComparer.Instance.GetHashCode(b));
+        }
+
+        [Theory]
         [InlineData("Charizard", "Charizard", true)]
         [InlineData("charizard ", "Charizard", true)]
         [InlineData("Mr. Mime", "MrMime", true)]

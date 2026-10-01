@@ -241,6 +241,32 @@ namespace SysBot.Pokemon.SV.BotRaid
     }
 
     /// <summary>
+    /// Compares Pokémon names by letters and digits only, ignoring case, so
+    /// "Chien-Pao", "Chien Pao" and "ChienPao" are the same event species.
+    /// </summary>
+    public sealed class EventSpeciesComparer : IEqualityComparer<string>
+    {
+        public static readonly EventSpeciesComparer Instance = new();
+
+        public bool Equals(string? x, string? y) => Key(x) == Key(y);
+
+        public int GetHashCode(string obj) => Key(obj).GetHashCode(StringComparison.Ordinal);
+
+        private static string Key(string? name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return string.Empty;
+            var buffer = new System.Text.StringBuilder(name.Length);
+            foreach (var c in name)
+            {
+                if (char.IsLetterOrDigit(c))
+                    buffer.Append(char.ToLowerInvariant(c));
+            }
+            return buffer.ToString();
+        }
+    }
+
+    /// <summary>
     /// Rules shared by the claim path and its tests.
     /// </summary>
     public static class WebRaidRules

@@ -34,9 +34,30 @@ namespace SysBot.Pokemon.SV.BotRaid
         private readonly RotatingRaidSettingsSV _settings = hub.Config.RotatingRaidSV;
         private RemoteControlAccessList RaiderBanList => _settings.RaiderBanList;
 
-        // Store Event Data - map of species to group IDs
+        // Store Event Data - map of species to group IDs. Names match however they are
+        // written ("Chien-Pao", "Chien Pao", "chienpao" and the enum's "ChienPao").
         public static Dictionary<string, List<(int GroupID, int Index, string DenIdentifier)>> SpeciesToGroupIDMap { get; set; } =
-            new Dictionary<string, List<(int GroupID, int Index, string DenIdentifier)>>(StringComparer.OrdinalIgnoreCase);
+            new Dictionary<string, List<(int GroupID, int Index, string DenIdentifier)>>(EventSpeciesComparer.Instance);
+
+        /// <summary>
+        /// Which crystal an active event raid of this species and star count uses:
+        /// Might for 7★, Distribution for 1-5★, or null when the event has no such raid.
+        /// </summary>
+        public static TeraCrystalType? EventCrystalFor(string species, int stars)
+        {
+            if (string.IsNullOrWhiteSpace(species) || !ActiveEventCrystals.TryGetValue(species, out var crystals))
+                return null;
+            var wanted = stars switch
+            {
+                7 => TeraCrystalType.Might,
+                >= 1 and <= 5 => TeraCrystalType.Distribution,
+                _ => (TeraCrystalType?)null,
+            };
+            return wanted is { } c && crystals.Contains(c) ? c : null;
+        }
+
+        // Crystal of each event raid on the map now, filled with SpeciesToGroupIDMap.
+        private static readonly Dictionary<string, HashSet<TeraCrystalType>> ActiveEventCrystals = new(EventSpeciesComparer.Instance);
 
         // Shared HTTP client for network operations
         private static readonly HttpClient _httpClient = new();
@@ -122,11 +143,6 @@ namespace SysBot.Pokemon.SV.BotRaid
         private const string MysteryRaidTitle = "Mystery Shiny Raid";
         private const string UserRequestedRaidSuffix = "'s Requested Raid";
 
-        // Region boundary constants for raid index calculations
-        private const int PaldeaRaidCount = 69;
-        private const int KitakamiRaidCount = 25;
-        private const int KitakamiStartIndex = PaldeaRaidCount;
-        private const int BlueberryStartIndex = PaldeaRaidCount + KitakamiRaidCount;
 
         // Cached den locations to avoid repeated JSON loading
         private static readonly Lazy<Dictionary<string, float[]>> CachedPaldeaDenLocations = new(() =>
@@ -281,9 +297,6 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Generate two random shiny raids
             for (int i = 0; i < 2; i++)
             {
-                uint randomSeed = GenerateRandomShinySeed();
-                string seedValue = randomSeed.ToString("X8");
-
                 // Use current game state for parameters
                 int difficultyLevel = currentGameProgress switch
                 {
@@ -296,6 +309,19 @@ namespace SysBot.Pokemon.SV.BotRaid
 
                 var crystalType = difficultyLevel == 6 ? TeraCrystalType.Black : TeraCrystalType.Base;
                 int contentType = difficultyLevel == 6 ? 1 : 0; // Black crystal raids use contentType 1
+
+                // A random shiny seed rolls its own star count; keep drawing until it matches.
+                string NextMatchingSeed()
+                {
+                    string candidate = GenerateRandomShinySeed().ToString("X8");
+                    for (int attempt = 0; contentType == 0 && attempt < 2000
+                        && GetStarCount(candidate, contentType, currentRegion, (int)currentGameProgress + 1) != difficultyLevel; attempt++)
+                    {
+                        candidate = GenerateRandomShinySeed().ToString("X8");
+                    }
+                    return candidate;
+                }
+                string seedValue = NextMatchingSeed();
                 int raidDeliveryGroupID = 0;
 
                 // Retry logic for RaidInfoCommand in case of initial failures
@@ -335,8 +361,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                             if (retryCount < maxRetries)
                             {
                                 // Try a different seed
-                                randomSeed = GenerateRandomShinySeed();
-                                seedValue = randomSeed.ToString("X8");
+                                seedValue = NextMatchingSeed();
                                 await Task.Delay(500, token); // Small delay before retry
                             }
                         }
@@ -354,8 +379,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                         if (retryCount < maxRetries)
                         {
                             // Try a different seed
-                            randomSeed = GenerateRandomShinySeed();
-                            seedValue = randomSeed.ToString("X8");
+                            seedValue = NextMatchingSeed();
                             await Task.Delay(1000, token); // Delay before retry
                         }
                     }
@@ -465,7 +489,8 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             foreach (var raid in raidsToSave)
             {
-                int storyProgressValue = (int)raid.StoryProgress;
+                // raidsv.txt uses the 3-6 scale (3★ unlocked ... 6★ unlocked); StoryProgress is 2-5.
+                int storyProgressValue = (int)raid.StoryProgress + 1;
                 sb.Append($"{raid.Seed}-{raid.Species}-{raid.DifficultyLevel}-{storyProgressValue},");
             }
 
@@ -1782,7 +1807,6 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// </summary>
         private void CreateMysteryRaid()
         {
-            uint randomSeed = GenerateRandomShinySeed();
             Random random = new();
             var mysteryRaidsSettings = _settings.RaidSettings.MysteryRaidsSettings;
 
@@ -1857,21 +1881,17 @@ namespace SysBot.Pokemon.SV.BotRaid
                 _ => throw new ArgumentException("Invalid difficulty level.")
             };
 
-            string seedValue = randomSeed.ToString("X8");
             int contentType = randomDifficultyLevel == 6 ? 1 : 0;
-            TeraRaidMapParent map;
+            TeraRaidMapParent map = CurrentMap;
+            int storyLevel = (int)gameProgress + 1; // 3-6 scale
 
-            if (!IsBlueberry && !IsKitakami)
+            // A random shiny seed rolls its own star count; keep drawing until it is
+            // the difficulty this raid is labeled with. 6★ (black) is always 6★.
+            string seedValue = GenerateRandomShinySeed().ToString("X8");
+            for (int attempt = 0; contentType == 0 && attempt < 2000
+                && GetStarCount(seedValue, contentType, map, storyLevel) != randomDifficultyLevel; attempt++)
             {
-                map = TeraRaidMapParent.Paldea;
-            }
-            else if (IsKitakami)
-            {
-                map = TeraRaidMapParent.Kitakami;
-            }
-            else
-            {
-                map = TeraRaidMapParent.Blueberry;
+                seedValue = GenerateRandomShinySeed().ToString("X8");
             }
 
             int raidDeliveryGroupID = 0;
@@ -1882,7 +1902,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             bool defaultIsEvent = false;
 
             (PK9 pk, Embed embed) = RaidInfoCommand(
-                seedValue, contentType, map, (int)gameProgress, raidDeliveryGroupID,
+                seedValue, contentType, map, storyLevel, raidDeliveryGroupID,
                 emptyRewardsToShow, defaultMoveTypeEmojis, emptyCustomTypeEmojis,
                 defaultQueuePosition, defaultIsEvent, (int)_settings.EmbedToggles.EmbedLanguage
             );
@@ -2124,16 +2144,26 @@ namespace SysBot.Pokemon.SV.BotRaid
                 return (null, "The seed or difficulty in this request is not valid.", false);
 
             int groupId = -1;
+            var crystal = WebRaidRules.CrystalFor(request.Stars, request.IsEvent);
             if (request.IsEvent)
             {
                 if (map != TeraRaidMapParent.Paldea)
                     return (null, "Event raids only run in Paldea.", true);
                 if (string.IsNullOrWhiteSpace(request.Species) || !SpeciesToGroupIDMap.TryGetValue(request.Species, out var groups) || groups.Count == 0)
                     return (null, $"This bot no longer has the {request.Species} event.", true);
+                if (EventCrystalFor(request.Species, request.Stars) is not { } eventCrystal)
+                    return (null, $"The {request.Species} event has no {request.Stars}★ raid.", false);
+                crystal = eventCrystal;
                 groupId = groups[0].GroupID;
             }
+            else
+            {
+                int contentType = crystal == TeraCrystalType.Black ? 1 : 0;
+                int stars = GetStarCount(request.Seed, contentType, map, request.StoryProgress);
+                if (stars != request.Stars)
+                    return (null, $"With that story progress, seed {request.Seed} makes a {stars}★ raid, not {request.Stars}★. Check the difficulty and story progress you searched with.", false);
+            }
 
-            var crystal = WebRaidRules.CrystalFor(request.Stars, request.IsEvent);
             var embedSettings = _settings.EmbedToggles;
             PK9 pk;
             Embed embed;
@@ -2642,8 +2672,11 @@ namespace SysBot.Pokemon.SV.BotRaid
             }
 
             var currentSeed = _settings.ActiveRaids[_currentRaidIndex].Seed.ToUpper();
+            bool seedsMatch = uint.TryParse(_denHexSeed, NumberStyles.AllowHexSpecifier, null, out var denSeed)
+                && uint.TryParse(currentSeed, NumberStyles.AllowHexSpecifier, null, out var wantedSeed)
+                && denSeed == wantedSeed;
 
-            if (!_denHexSeed.Equals(currentSeed, StringComparison.CurrentCultureIgnoreCase))
+            if (!seedsMatch)
             {
                 _seedMismatchCount++;
                 Log($"Raid Den and Current Seed do not match. Mismatch count: {_seedMismatchCount}");
@@ -3905,8 +3938,14 @@ namespace SysBot.Pokemon.SV.BotRaid
             var currentRaid = _settings.ActiveRaids[_currentRaidIndex];
             string seedValue = currentRaid.Seed;
 
+            // Outside Paldea the seed is injected as a black crystal (see OverrideSeedIndex),
+            // so describe the raid that is actually hosted.
+            var crystalType = currentRaid.CrystalType;
+            if ((IsKitakami || IsBlueberry) && crystalType is TeraCrystalType.Might or TeraCrystalType.Distribution)
+                crystalType = TeraCrystalType.Black;
+
             // Map TeraCrystalType to RaidInfoCommand's contentType parameter
-            int contentType = currentRaid.CrystalType switch
+            int contentType = crystalType switch
             {
                 TeraCrystalType.Base => 0,    // Base crystal = regular raid
                 TeraCrystalType.Black => 1,   // Black crystal = 1
@@ -3929,8 +3968,8 @@ namespace SysBot.Pokemon.SV.BotRaid
             int raidDeliveryGroupID = currentRaid.GroupID ?? 0;
 
             // Distribution and Might are true events
-            bool isEvent = currentRaid.CrystalType == TeraCrystalType.Distribution ||
-                          currentRaid.CrystalType == TeraCrystalType.Might;
+            bool isEvent = crystalType == TeraCrystalType.Distribution ||
+                          crystalType == TeraCrystalType.Might;
 
             // Get the selected language ID
             int languageId = (int)_settings.EmbedToggles.EmbedLanguage;
@@ -3942,7 +3981,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             (PK9 pk, Embed embed) = RaidInfoCommand(
                 seedValue, contentType, map, storyProgressLevel, raidDeliveryGroupID,
                 _settings.EmbedToggles.RewardsToShow, _settings.EmbedToggles.MoveTypeEmojis,
-                _settings.EmbedToggles.CustomTypeEmojis, 0, isEvent, languageId
+                _settings.EmbedToggles.CustomTypeEmojis, 0, isEvent, languageId, forHostedRaid: true
             );
 
             // Populate RaidEmbedInfoHelpers with data from the generated embed and PK9
@@ -4410,68 +4449,45 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             await Task.Delay(19_000 + timing.RestartGameSettings.ExtraTimeLoadGame, token).ConfigureAwait(false);
             await InitializeRaidBlockPointers(token);
 
-            if (_settings.ActiveRaids.Count > 1)
+            if (!NoActiveRaids)
             {
                 Log($"Rotation for {_settings.ActiveRaids[_currentRaidIndex].Species} has been found.");
-                Log($"Checking Current Game Progress Level.");
 
+                // A game restart reloads the save, which undoes any progress or spawn
+                // setting written to memory before. Write both on every start, from
+                // what the game holds now rather than what was written last time.
                 var desiredProgress = _settings.ActiveRaids[_currentRaidIndex].StoryProgress;
-                if (GameProgress != (GameProgress)desiredProgress)
+                try
                 {
-                    Log($"Updating game progress level to: {desiredProgress}");
-                    int raidCrawlerProgress = GameProgressMapper.ToRaidCrawlerProgress(desiredProgress);
-                    // Verify expected star range for this progress level
                     var (minStar, maxStar) = GameProgressMapper.GetExpectedStarRange(desiredProgress);
-                    Log($"Expected star range for this progress level: {minStar}-{maxStar}★");
-
+                    Log($"Setting game progress to {desiredProgress} ({minStar}-{maxStar}★ raids).");
                     await WriteProgressLive((GameProgress)desiredProgress).ConfigureAwait(false);
                     GameProgress = (GameProgress)desiredProgress;
-
-                    Log($"Game progress updated successfully.");
                 }
-                else
+                catch (Exception ex)
                 {
-                    Log($"Game progress level is already {GameProgress}. No update needed.");
+                    Log($"Could not set game progress: {ex.Message}");
                 }
 
-                RaidDataBlocks.AdjustKWildSpawnsEnabledType(_settings.RaidSettings.DisableOverworldSpawns);
-
-                if (_settings.RaidSettings.DisableOverworldSpawns)
+                try
                 {
-                    Log("Checking current state of Overworld Spawns.");
-                    if (CurrentSpawnsEnabled.HasValue)
+                    RaidDataBlocks.AdjustKWildSpawnsEnabledType(_settings.RaidSettings.DisableOverworldSpawns);
+                    bool wantSpawns = !_settings.RaidSettings.DisableOverworldSpawns;
+                    var spawnsNow = (bool?)await ReadBlock(RaidDataBlocks.KWildSpawnsEnabled, CancellationToken.None).ConfigureAwait(false);
+                    if (spawnsNow is bool current)
                     {
-                        Log($"Current Overworld Spawns state: {CurrentSpawnsEnabled.Value}");
-
-                        if (CurrentSpawnsEnabled.Value)
+                        bool written = current == wantSpawns;
+                        if (!written)
                         {
-                            Log("Overworld Spawns are enabled, attempting to disable.");
-                            await WriteBlock(false, RaidDataBlocks.KWildSpawnsEnabled, token, CurrentSpawnsEnabled);
-                            CurrentSpawnsEnabled = false;
-                            Log("Overworld Spawns successfully disabled.");
+                            Log(wantSpawns ? "Turning Overworld Spawns back on." : "Turning Overworld Spawns off.");
+                            written = await WriteBlock(wantSpawns, RaidDataBlocks.KWildSpawnsEnabled, token, current).ConfigureAwait(false);
                         }
-                        else
-                        {
-                            Log("Overworld Spawns are already disabled, no action taken.");
-                        }
+                        CurrentSpawnsEnabled = written ? wantSpawns : current;
                     }
                 }
-                else
+                catch (Exception ex)
                 {
-                    Log("Settings indicate Overworld Spawns should be enabled. Checking current state.");
-                    Log($"Current Overworld Spawns state: {CurrentSpawnsEnabled.Value}");
-
-                    if (!CurrentSpawnsEnabled.Value)
-                    {
-                        Log("Overworld Spawns are disabled, attempting to enable.");
-                        await WriteBlock(true, RaidDataBlocks.KWildSpawnsEnabled, token, CurrentSpawnsEnabled);
-                        CurrentSpawnsEnabled = true;
-                        Log("Overworld Spawns successfully enabled.");
-                    }
-                    else
-                    {
-                        Log("Overworld Spawns are already enabled, no action needed.");
-                    }
+                    Log($"Could not set Overworld Spawns: {ex.Message}");
                 }
 
                 Log($"Attempting to override seed for {_settings.ActiveRaids[_currentRaidIndex].Species}.");
@@ -4738,6 +4754,9 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 .OrderBy(raid => raid.Distance)
                 .FirstOrDefault();
 
+            // Never compare against the seed of a den read on an earlier pass.
+            _denHexSeed = string.Empty;
+
             if (nearestActiveRaid != null)
             {
                 // Check if the player is already at the nearest active den
@@ -4788,15 +4807,6 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
 
             var activeRaids = new List<(string DenIdentifier, float[] Coordinates, int Index, uint Seed, uint Flags, bool IsEvent)>();
 
-            // Calculate the starting index offset based on the map type
-            int startingIndex = mapType switch
-            {
-                TeraRaidMapParent.Paldea => 0,
-                TeraRaidMapParent.Kitakami => KitakamiStartIndex,
-                TeraRaidMapParent.Blueberry => BlueberryStartIndex,
-                _ => 0
-            };
-
             // Process each raid in the data
             for (int i = 0; i < raidData.Length; i += Raid.SIZE)
             {
@@ -4808,13 +4818,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                     string raidIdentifier = $"{raid.Area}-{raid.LotteryGroup}-{raid.Den}";
                     if (denLocations.TryGetValue(raidIdentifier, out var coordinates))
                     {
-                        int globalIndex = startingIndex + (i / Raid.SIZE);
-
-                        if (mapType == TeraRaidMapParent.Blueberry)
-                        {
-                            globalIndex -= 1;
-                        }
-
+                        int globalIndex = RaidMemoryManager.ToGlobalIndex(mapType, i / (int)Raid.SIZE);
                         activeRaids.Add((raidIdentifier, coordinates, globalIndex, raid.Seed, raid.Flags, raid.IsEvent));
                     }
                 }
@@ -4965,6 +4969,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             _raidBlockPointerP = await SwitchConnection.PointerAll(RaidCrawler.Core.Structures.Offsets.RaidBlockPointerBase.ToArray(), token).ConfigureAwait(false);
             _raidBlockPointerK = await SwitchConnection.PointerAll(RaidCrawler.Core.Structures.Offsets.RaidBlockPointerKitakami.ToArray(), token).ConfigureAwait(false);
             _raidBlockPointerB = await SwitchConnection.PointerAll(RaidCrawler.Core.Structures.Offsets.RaidBlockPointerBlueberry.ToArray(), token).ConfigureAwait(false);
+            _raidMemoryManager = new RaidMemoryManager(SwitchConnection, _raidBlockPointerP, _raidBlockPointerK, _raidBlockPointerB);
         }
 
         /// <summary>
@@ -5058,6 +5063,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
 
             if (!IsKitakami && !IsBlueberry)
             {
+                bool sawEventRaid = false;
                 // check if new event species is found
                 for (int i = 0; i < raidsToCheck; i++)
                 {
@@ -5067,16 +5073,32 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
 
                     if (isEventRaid)
                     {
+                        sawEventRaid = true;
                         string speciesName = SpeciesName.GetSpeciesName(encounter.Species, 2);
                         if (!SpeciesToGroupIDMap.ContainsKey(speciesName))
                         {
                             newEventSpeciesFound = true;
                             SpeciesToGroupIDMap.Clear(); // Clear the map as we've found a new event species
+                            ActiveEventCrystals.Clear();
                             break; // No need to check further
                         }
                     }
                 }
+
+                // Event dens sit at the front of the list; none there means the event is over.
+                if (!sawEventRaid && SpeciesToGroupIDMap.Count > 0)
+                {
+                    Log("No event raids on the map anymore. Clearing the event list.");
+                    SpeciesToGroupIDMap.Clear();
+                    ActiveEventCrystals.Clear();
+                }
             }
+
+            // Event dens are found by their seed in Paldea's raid block. Container.Raids
+            // skips empty and invalid slots, so a position in that list is not a slot.
+            byte[]? paldeaRaids = newEventSpeciesFound
+                ? await _raidMemoryManager.ReadRaidData(TeraRaidMapParent.Paldea, token).ConfigureAwait(false)
+                : null;
 
             int maxRaidIndex = Math.Min(allRaids.Count, allEncounters.Count);
             for (int i = 0; i < maxRaidIndex; i++)
@@ -5120,15 +5142,21 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                             }
                         }
 
-                        if (groupID != -1)
+                        int slot = FindSlotBySeed(paldeaRaids!, raid.Seed);
+                        if (groupID != -1 && slot >= 0)
                         {
+                            if (!ActiveEventCrystals.TryGetValue(speciesKey, out var crystals))
+                                ActiveEventCrystals[speciesKey] = crystals = [];
+                            crystals.Add(isMightRaid ? TeraCrystalType.Might : TeraCrystalType.Distribution);
+
+                            int index = RaidMemoryManager.ToGlobalIndex(TeraRaidMapParent.Paldea, slot);
                             if (!SpeciesToGroupIDMap.TryGetValue(speciesKey, out List<(int GroupID, int Index, string DenIdentifier)>? value))
                             {
-                                SpeciesToGroupIDMap[speciesKey] = [(groupID, i, denIdentifier)];
+                                SpeciesToGroupIDMap[speciesKey] = [(groupID, index, denIdentifier)];
                             }
                             else
                             {
-                                value.Add((groupID, i, denIdentifier));
+                                value.Add((groupID, index, denIdentifier));
                             }
                         }
                     }
@@ -5164,12 +5192,34 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             }
         }
 
+        private static int FindSlotBySeed(byte[] raidEntries, uint seed)
+        {
+            for (int slot = 0; RaidMemoryManager.SeedOffset(slot) + 4 <= raidEntries.Length; slot++)
+            {
+                if (BitConverter.ToUInt32(raidEntries, RaidMemoryManager.SeedOffset(slot)) == seed)
+                    return slot;
+            }
+            return -1;
+        }
+
+        /// <summary>
+        /// The encounter's own generation settings (fixed nature, IVs, size and gender
+        /// for events), with shininess spelled out so GenerateData never returns early:
+        /// a shiny-locked or always-shiny encounter keeps its lock, any other follows the seed.
+        /// </summary>
+        private static GenerateParam9 GetGenerateParam(ITeraRaid encounter, Raid raid) => encounter.GetParam() with
+        {
+            Shiny = encounter.Shiny switch
+            {
+                Shiny.Always => Shiny.Always,
+                Shiny.Never => Shiny.Never,
+                _ => raid.IsShiny ? Shiny.Always : Shiny.Never,
+            },
+        };
+
         private static (PK9, uint) IsSeedReturned(ITeraRaid encounter, Raid raid)
         {
-            var shiny = raid.IsShiny ? Shiny.Always : Shiny.Never;
-            var gender = PersonalTable.SV.GetFormEntry(encounter.Species, encounter.Form).Gender;
-            var param = new GenerateParam9(encounter.Species, gender, encounter.FlawlessIVCount, 1, 0, 0,
-                SizeType9.RANDOM, 0, encounter.Ability, shiny);
+            var param = GetGenerateParam(encounter, raid);
 
             var pk = new PK9
             {
@@ -5189,39 +5239,20 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         /// </summary>
         private async Task FindSeedIndexInRaids(uint denHexSeedUInt, CancellationToken token)
         {
-            // Search in Paldea region
-            var dataP = await SwitchConnection.ReadBytesAbsoluteAsync(_raidBlockPointerP, 2304, token).ConfigureAwait(false);
-            for (int i = 0; i < PaldeaRaidCount; i++)
+            _seedIndexToReplace = -1;
+            // The player's own map first; the same seed elsewhere is not the den they stand at.
+            var current = CurrentMap;
+            var maps = new[] { current }.Concat(new[] { TeraRaidMapParent.Paldea, TeraRaidMapParent.Kitakami, TeraRaidMapParent.Blueberry }.Where(m => m != current));
+            foreach (var map in maps)
             {
-                var seed = BitConverter.ToUInt32(dataP.AsSpan(Raid.SIZE + i * Raid.SIZE, 4));
-                if (seed == denHexSeedUInt)
+                var data = await _raidMemoryManager.ReadRaidData(map, token).ConfigureAwait(false);
+                for (int slot = 0; RaidMemoryManager.SeedOffset(slot) + 4 <= data.Length; slot++)
                 {
-                    _seedIndexToReplace = i;
-                    return;
-                }
-            }
-
-            // Search in Kitakami region
-            var dataK = await SwitchConnection.ReadBytesAbsoluteAsync(_raidBlockPointerK + 0x10, 0xC80, token).ConfigureAwait(false);
-            for (int i = 0; i < BlueberryStartIndex; i++)
-            {
-                var seed = BitConverter.ToUInt32(dataK.AsSpan(i * Raid.SIZE, 4));
-                if (seed == denHexSeedUInt)
-                {
-                    _seedIndexToReplace = i + KitakamiStartIndex;
-                    return;
-                }
-            }
-
-            // Search in Blueberry region
-            var dataB = await SwitchConnection.ReadBytesAbsoluteAsync(_raidBlockPointerB + 0x10, 0xA00, token).ConfigureAwait(false);
-            for (int i = BlueberryStartIndex; i < 118; i++)
-            {
-                var seed = BitConverter.ToUInt32(dataB.AsSpan((i - BlueberryStartIndex) * Raid.SIZE, 4));
-                if (seed == denHexSeedUInt)
-                {
-                    _seedIndexToReplace = i - 1;
-                    return;
+                    if (BitConverter.ToUInt32(data, RaidMemoryManager.SeedOffset(slot)) == denHexSeedUInt)
+                    {
+                        _seedIndexToReplace = RaidMemoryManager.ToGlobalIndex(map, slot);
+                        return;
+                    }
                 }
             }
 
@@ -5231,9 +5262,48 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         /// <summary>
         /// Creates raid info for API command
         /// </summary>
+        /// <summary>
+        /// Builds the in-memory raid record for a seed, the same 32 bytes the game stores.
+        /// </summary>
+        private static Raid BuildRaid(string seedValue, int contentType, TeraRaidMapParent map)
+        {
+            byte[] enabled = StringToByteArray("00000001");
+            byte[] area = StringToByteArray("00000001");
+            byte[] displaytype = StringToByteArray("00000001");
+            byte[] spawnpoint = StringToByteArray("00000001");
+            byte[] thisseed = StringToByteArray(seedValue);
+            byte[] unused = StringToByteArray("00000000");
+            byte[] content = StringToByteArray($"0000000{contentType}");
+            byte[] leaguepoints = StringToByteArray("00000000");
+            byte[] raidbyte = [.. enabled, .. area, .. displaytype, .. spawnpoint, .. thisseed, .. unused, .. content, .. leaguepoints];
+            return new Raid(raidbyte, map);
+        }
+
+        /// <summary>
+        /// Story progress on the bot's 3-6 scale (3★ ... 6★ unlocked) to RaidCrawler's 1-4.
+        /// </summary>
+        private static int ToRaidCrawlerProgress(int storyProgressLevel) => storyProgressLevel switch
+        {
+            3 => 1,
+            4 => 2,
+            5 => 3,
+            6 => 4,
+            0 => 0,
+            _ => 4 // default 6Unlocked
+        };
+
+        /// <summary>
+        /// Star count a regular (non-event) seed rolls at a story progress level (3-6).
+        /// </summary>
+        public static int GetStarCount(string seedValue, int contentType, TeraRaidMapParent map, int storyProgressLevel)
+        {
+            var raid = BuildRaid(seedValue, contentType, map);
+            return raid.GetStarCount(raid.Difficulty, ToRaidCrawlerProgress(storyProgressLevel), raid.IsBlack);
+        }
+
         public static (PK9, Embed) RaidInfoCommand(string seedValue, int contentType, TeraRaidMapParent map, int storyProgressLevel,
             int raidDeliveryGroupID, List<string> rewardsToShow, bool moveTypeEmojis, List<MoveTypeEmojiInfo> customTypeEmojis,
-            int queuePosition = 0, bool isEvent = false, int languageId = 1)
+            int queuePosition = 0, bool isEvent = false, int languageId = 1, bool forHostedRaid = false)
         {
             if (Container == null)
             {
@@ -5247,42 +5317,18 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 return (new PK9(), errorEmbed.Build());
             }
 
-            // Process and parse raid data
-            byte[] enabled = StringToByteArray("00000001");
-            byte[] area = StringToByteArray("00000001");
-            byte[] displaytype = StringToByteArray("00000001");
-            byte[] spawnpoint = StringToByteArray("00000001");
-            byte[] thisseed = StringToByteArray(seedValue);
-            byte[] unused = StringToByteArray("00000000");
-            byte[] content = StringToByteArray($"0000000{contentType}");
-            byte[] leaguepoints = StringToByteArray("00000000");
-            byte[] raidbyte = enabled.Concat(area).ToArray().Concat(displaytype).ToArray().Concat(spawnpoint).ToArray().Concat(thisseed).ToArray().Concat(unused).ToArray().Concat(content).ToArray().Concat(leaguepoints).ToArray();
-
-            storyProgressLevel = storyProgressLevel switch
-            {
-                3 => 1,
-                4 => 2,
-                5 => 3,
-                6 => 4,
-                0 => 0,
-                _ => 4 // default 6Unlocked
-            };
-
-            // Create raid and encounter objects
-            var raid = new Raid(raidbyte, map);
+            var raid = BuildRaid(seedValue, contentType, map);
+            storyProgressLevel = ToRaidCrawlerProgress(storyProgressLevel);
             var progress = storyProgressLevel;
             var raid_delivery_group_id = raidDeliveryGroupID;
-            var encounter = raid.GetTeraEncounter(Container, raid.IsEvent ? 3 : progress, contentType == 3 ? 1 : raid_delivery_group_id);
+            // The game caps event progress at 3, but never above the host's own progress.
+            var encounter = raid.GetTeraEncounter(Container, raid.IsEvent ? Math.Min(progress, 3) : progress, contentType == 3 ? 1 : raid_delivery_group_id);
             var reward = encounter.GetRewards(Container, raid, 0);
             var stars = raid.IsEvent ? encounter.Stars : raid.GetStarCount(raid.Difficulty, storyProgressLevel, raid.IsBlack);
             var teraType = raid.GetTeraType(encounter);
             var level = encounter.Level;
 
-            // Create GenerateParam9 with explicit shiny state to bypass early-return check in GenerateData
-            var shiny = raid.IsShiny ? Shiny.Always : Shiny.Never;
-            var gender = PersonalTable.SV.GetFormEntry(encounter.Species, encounter.Form).Gender;
-            var param = new GenerateParam9(encounter.Species, gender, encounter.FlawlessIVCount, 1, 0, 0,
-                SizeType9.RANDOM, 0, encounter.Ability, shiny);
+            var param = GetGenerateParam(encounter, raid);
 
             var pk = new PK9
             {
@@ -5458,15 +5504,18 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             string englishSpecialRewards = GetSpecialRewards(reward, rewardsToShow, 2);
             string englishFormName = ShowdownParsing.GetStringFromForm(pk.Form, englishStrings, pk.Species, pk.Context);
             string englishAuthorName = $"{stars} ★ {titlePrefix}{englishStrings.Species[encounter.Species]}{(pk.Form != 0 ? $"-{englishFormName}" : "")}{(isEvent ? " (Event Raid)" : "")}";
-            RaidEmbedEnglishHelpers.RaidEmbedTitle = englishAuthorName;
-            RaidEmbedEnglishHelpers.RaidSpeciesGender = pk.Gender == 0 ? "Male" : (pk.Gender == 1 ? "Female" : "Genderless");
-            RaidEmbedEnglishHelpers.RaidSpeciesAbility = englishStrings.Ability[pk.Ability];
-            RaidEmbedEnglishHelpers.RaidSpeciesNature = englishStrings.Natures[(int)pk.Nature];
-            RaidEmbedEnglishHelpers.RaidSpeciesTeraType = englishStrings.Types[teraType];
-            RaidEmbedEnglishHelpers.Moves = englishMovesList.ToString().TrimEnd();
-            RaidEmbedEnglishHelpers.ExtraMoves = englishExtraMovesList.ToString().TrimEnd();
-            RaidEmbedEnglishHelpers.ScaleText = ScaleLabel(pk.Scale);
-            RaidEmbedEnglishHelpers.SpecialRewards = englishSpecialRewards;
+            if (forHostedRaid)
+            {
+                RaidEmbedEnglishHelpers.RaidEmbedTitle = englishAuthorName;
+                RaidEmbedEnglishHelpers.RaidSpeciesGender = pk.Gender == 0 ? "Male" : (pk.Gender == 1 ? "Female" : "Genderless");
+                RaidEmbedEnglishHelpers.RaidSpeciesAbility = englishStrings.Ability[pk.Ability];
+                RaidEmbedEnglishHelpers.RaidSpeciesNature = englishStrings.Natures[(int)pk.Nature];
+                RaidEmbedEnglishHelpers.RaidSpeciesTeraType = englishStrings.Types[teraType];
+                RaidEmbedEnglishHelpers.Moves = englishMovesList.ToString().TrimEnd();
+                RaidEmbedEnglishHelpers.ExtraMoves = englishExtraMovesList.ToString().TrimEnd();
+                RaidEmbedEnglishHelpers.ScaleText = ScaleLabel(pk.Scale);
+                RaidEmbedEnglishHelpers.SpecialRewards = englishSpecialRewards;
+            }
 
             return (pk, embed.Build());
         }

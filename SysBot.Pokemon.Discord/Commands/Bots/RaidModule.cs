@@ -34,14 +34,9 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             int storyProgressLevel = 6,
             string? speciesName = null)
         {
-            uint seed;
-            try
+            if (!SysBot.Pokemon.SV.BotRaid.WebRaidRules.IsValidSeed(seedValue))
             {
-                seed = uint.Parse(seedValue, NumberStyles.AllowHexSpecifier);
-            }
-            catch (FormatException)
-            {
-                await ReplyAsync("Invalid seed format. Please enter a valid seed.");
+                await ReplyAsync("Invalid seed format. Please enter a seed of exactly 8 hexadecimal digits.");
                 return;
             }
             if (level == 7 && storyProgressLevel == 6 && string.IsNullOrEmpty(speciesName))
@@ -618,6 +613,18 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             {
                 await ReplyAsync("Species name not recognized or not associated with an active event. Please check the name and try again.");
                 return;
+            }
+
+            if (isEvent)
+            {
+                // Might events are 7★ and Distribution events are 1-5★; the event decides, not the level typed.
+                if (EventCrystalFor(speciesName!, level) is not { } eventCrystal)
+                {
+                    string kind = EventCrystalFor(speciesName!, 7) is not null ? "a 7★ Might raid" : "a 1-5★ event raid";
+                    await ReplyAsync($"The {speciesName} event is {kind}, not {level}★. Please request it at that difficulty.").ConfigureAwait(false);
+                    return;
+                }
+                crystalType = eventCrystal;
             }
 
             int effectiveQueuePosition = 1;
