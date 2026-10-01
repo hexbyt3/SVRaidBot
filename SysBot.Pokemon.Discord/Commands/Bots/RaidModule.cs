@@ -25,6 +25,33 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
     {
         private readonly PokeRaidHub<T> Hub = SysCord<T>.Runner.Hub;
 
+        private List<RotatingRaidParameters> RaidList => Hub.Config.RotatingRaidSV.ActiveRaids;
+
+        private const string WebRequestLocked = "That is a GenPKM member's request. It finishes or times out on its own, and the member is kept up to date on the site.";
+
+        private bool IsHosting => Hub.Bots.CountWhere(b => b.Config.CurrentRoutineType != PokeRoutineType.Idle) > 0;
+
+        /// <summary>
+        /// Takes a raid out of the list. While a bot is hosting, the raid is only
+        /// marked and the hosting loop removes it between raids, so the raid it is
+        /// tracking by position never shifts under it.
+        /// </summary>
+        private void RemoveRaid(RotatingRaidParameters raid)
+        {
+            lock (RaidListSync.Gate)
+            {
+                if (IsHosting)
+                {
+                    raid.ActiveInRotation = false;
+                    raid.PendingRemoval = true;
+                }
+                else
+                {
+                    RaidList.Remove(raid);
+                }
+            }
+        }
+
         [Command("raidinfo")]
         [Alias("ri", "rv")]
         [Summary("Displays basic Raid Info of the provided seed.")]
@@ -433,7 +460,8 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                     "Level: 1"
                 };
             }
-            Hub.Config.RotatingRaidSV.ActiveRaids.Add(newparam);
+            lock (RaidListSync.Gate)
+                RaidList.Add(newparam);
             await Context.Message.DeleteAsync().ConfigureAwait(false);
             var msg = $"Your new raid has been added.";
             await ReplyAsync(msg, embed: raidEmbed).ConfigureAwait(false);
@@ -538,16 +566,17 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 return;
             }
             var userId = Context.User.Id;
-            if (Hub.Config.RotatingRaidSV.ActiveRaids.Any(r => r.RequestedByUserID == userId))
+            if (RaidListSync.Snapshot(RaidList).Any(r => r.RequestedByUserID == userId && !r.PendingRemoval))
             {
                 await ReplyAsync("You already have an existing raid request in the queue.").ConfigureAwait(false);
                 return;
             }
             var userRequestManager = new UserRequestManager();
             var userRoles = (Context.User as SocketGuildUser)?.Roles.Select(r => r.Id) ?? new List<ulong>();
+            bool limited = !Hub.Config.RotatingRaidSV.RaidSettings.BypassLimitRequests.ContainsKey(userId) &&
+                !userRoles.Any(Hub.Config.RotatingRaidSV.RaidSettings.BypassLimitRequests.ContainsKey);
 
-            if (!Hub.Config.RotatingRaidSV.RaidSettings.BypassLimitRequests.ContainsKey(userId) &&
-                !userRoles.Any(Hub.Config.RotatingRaidSV.RaidSettings.BypassLimitRequests.ContainsKey))
+            if (limited)
             {
                 if (!userRequestManager.CanRequest(userId, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequests, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequestsTime, out var remainingCooldown))
                 {
@@ -690,25 +719,26 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                     "Level: 1"
                 };
             }
-            // Determine the correct position to insert the new raid after the current rotation
-            int insertPosition = RotationCount + 1;
-            while (insertPosition < Hub.Config.RotatingRaidSV.ActiveRaids.Count && Hub.Config.RotatingRaidSV.ActiveRaids[insertPosition].AddedByRACommand)
+            lock (RaidListSync.Gate)
             {
-                insertPosition++;
-            }
-            // Set RaidUpNext to true only if the new raid is inserted immediately next in the rotation
-            if (insertPosition == RotationCount + 1)
-            {
-                newparam.RaidUpNext = true;
-            }
-            // After the new raid is inserted
-            Hub.Config.RotatingRaidSV.ActiveRaids.Insert(insertPosition, newparam);
+                if (RaidList.Any(r => r.RequestedByUserID == userId && !r.PendingRemoval))
+                {
+                    _ = ReplyAsync("You already have an existing raid request in the queue.");
+                    return;
+                }
 
-            // Adjust RotationCount
-            if (insertPosition <= RotationCount)
-            {
-                RotationCount++;
+                // After the raid being hosted, behind any requests already waiting there
+                int insertPosition = Math.Min(RotationCount + 1, RaidList.Count);
+                while (insertPosition < RaidList.Count && RaidList[insertPosition].AddedByRACommand)
+                {
+                    insertPosition++;
+                }
+                newparam.RaidUpNext = insertPosition == RotationCount + 1;
+                RaidList.Insert(insertPosition, newparam);
             }
+
+            if (limited)
+                userRequestManager.RecordRequest(userId, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequests, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequestsTime);
 
             // Calculate the user's position in the queue and the estimated wait time
             effectiveQueuePosition = CalculateEffectiveQueuePosition(Context.User.Id, RotationCount);
@@ -829,8 +859,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 }
 
                 var userId = Context.User.Id;
-                var raidParameters = Hub.Config.RotatingRaidSV.ActiveRaids;
-                var raidToUpdate = raidParameters.FirstOrDefault(r => r.RequestedByUserID == userId);
+                var raidToUpdate = RaidListSync.Snapshot(RaidList).FirstOrDefault(r => r.RequestedByUserID == userId && !r.PendingRemoval);
                 string[] partyPK = content.Split('\n', StringSplitOptions.RemoveEmptyEntries); // Remove empty lines
                 if (raidToUpdate != null)
                 {
@@ -875,8 +904,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             else
             {
                 var userId = Context.User.Id;
-                var raidParameters = Hub.Config.RotatingRaidSV.ActiveRaids;
-                var raidToUpdate = raidParameters.FirstOrDefault(r => r.RequestedByUserID == userId);
+                var raidToUpdate = RaidListSync.Snapshot(RaidList).FirstOrDefault(r => r.RequestedByUserID == userId && !r.PendingRemoval);
                 var set = ShowdownParsing.GetShowdownText(pk);
                 string[] partyPK = set.Split('\n', StringSplitOptions.RemoveEmptyEntries);
                 if (raidToUpdate != null)
@@ -903,7 +931,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             int currentPosition = RotationCount;
 
             // Find the index of the user's request in the queue, excluding Mystery Shiny Raids
-            var userRequestIndex = Hub.Config.RotatingRaidSV.ActiveRaids.FindIndex(r => r.RequestedByUserID == userId && !r.Title.Contains("Mystery Shiny Raid"));
+            var userRequestIndex = RaidListSync.Snapshot(RaidList).FindIndex(r => r.RequestedByUserID == userId && !r.PendingRemoval && !r.Title.Contains("Mystery Shiny Raid"));
 
             EmbedBuilder embed = new();
 
@@ -945,11 +973,15 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         {
             int effectivePosition = 0;
             bool userRequestFound = false;
+            var raids = RaidListSync.Snapshot(RaidList).Where(r => !r.PendingRemoval).ToList();
+            if (raids.Count == 0)
+                return 0;
+            currentPosition = Math.Clamp(currentPosition, 0, raids.Count - 1);
 
-            for (int i = currentPosition; i < Hub.Config.RotatingRaidSV.ActiveRaids.Count + currentPosition; i++)
+            for (int i = currentPosition; i < raids.Count + currentPosition; i++)
             {
-                int actualIndex = i % Hub.Config.RotatingRaidSV.ActiveRaids.Count;
-                var raid = Hub.Config.RotatingRaidSV.ActiveRaids[actualIndex];
+                int actualIndex = i % raids.Count;
+                var raid = raids[actualIndex];
 
                 // Check if the raid is added by the RA command and is not a Mystery Shiny Raid
                 if (raid.AddedByRACommand && !raid.Title.Contains("Mystery Shiny Raid"))
@@ -973,7 +1005,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             {
                 for (int i = 0; i < currentPosition; i++)
                 {
-                    var raid = Hub.Config.RotatingRaidSV.ActiveRaids[i];
+                    var raid = raids[i];
                     if (raid.AddedByRACommand && !raid.Title.Contains("Mystery Shiny Raid"))
                     {
                         if (raid.RequestedByUserID == userId)
@@ -998,10 +1030,9 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         public async Task RemoveOwnRaidParam()
         {
             var userId = Context.User.Id;
-            var list = Hub.Config.RotatingRaidSV.ActiveRaids;
 
             // Find the raid added by the user
-            var userRaid = list.FirstOrDefault(r => r.RequestedByUserID == userId && r.AddedByRACommand);
+            var userRaid = RaidListSync.Snapshot(RaidList).FirstOrDefault(r => r.RequestedByUserID == userId && r.AddedByRACommand && !r.PendingRemoval);
             if (userRaid == null)
             {
                 await ReplyAsync("You don't have a raid added.").ConfigureAwait(false);
@@ -1016,7 +1047,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             }
 
             // Remove the raid if it's not up next
-            list.Remove(userRaid);
+            RemoveRaid(userRaid);
             await Context.Message.DeleteAsync().ConfigureAwait(false);
             var msg = $"Cleared your Raid from the queue.";
             await ReplyAsync(msg).ConfigureAwait(false);
@@ -1028,11 +1059,16 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task RemoveRaidParam([Summary("Seed Index")] int index)
         {
-            var list = Hub.Config.RotatingRaidSV.ActiveRaids;
+            var list = RaidListSync.Snapshot(RaidList);
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];
-                list.RemoveAt(index);
+                if (raid.WebRequest is not null)
+                {
+                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
+                    return;
+                }
+                RemoveRaid(raid);
                 var msg = $"Raid for {raid.Title} | {raid.Seed:X8} has been removed!";
                 await ReplyAsync(msg).ConfigureAwait(false);
             }
@@ -1046,10 +1082,22 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ToggleRaidParam([Summary("Seed Index")] int index)
         {
-            var list = Hub.Config.RotatingRaidSV.ActiveRaids;
+            var list = RaidListSync.Snapshot(RaidList);
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];
+                if (raid.WebRequest is not null)
+                {
+                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
+                    return;
+                }
+                // A request switched off would sit in the list forever and block its owner from asking again.
+                if (raid.AddedByRACommand && raid.ActiveInRotation && !raid.Title.Contains("Mystery Shiny Raid"))
+                {
+                    RemoveRaid(raid);
+                    await ReplyAsync($"Request {raid.Title} | {raid.Seed:X8} was canceled and removed from the queue.").ConfigureAwait(false);
+                    return;
+                }
                 raid.ActiveInRotation = !raid.ActiveInRotation;
                 var m = raid.ActiveInRotation ? "enabled" : "disabled";
                 var msg = $"Raid for {raid.Title} | {raid.Seed:X8} has been {m}!";
@@ -1065,7 +1113,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ToggleCodeRaidParam([Summary("Seed Index")] int index)
         {
-            var list = Hub.Config.RotatingRaidSV.ActiveRaids;
+            var list = RaidListSync.Snapshot(RaidList);
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];
@@ -1084,7 +1132,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ChangeRaidParamTitle([Summary("Seed Index")] int index, [Summary("Title")] string title)
         {
-            var list = Hub.Config.RotatingRaidSV.ActiveRaids;
+            var list = RaidListSync.Snapshot(RaidList);
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];
@@ -1101,7 +1149,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [Summary("Prints the raids in the current collection.")]
         public async Task GetRaidListAsync()
         {
-            var list = Hub.Config.RotatingRaidSV.ActiveRaids;
+            var list = RaidListSync.Snapshot(RaidList);
             int count = list.Count;
             int fields = (int)Math.Ceiling((double)count / 15);
             var embed = new EmbedBuilder
@@ -1130,7 +1178,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ToggleRaidParamPK([Summary("Seed Index")] int index, [Summary("Showdown Set")][Remainder] string content)
         {
-            var list = Hub.Config.RotatingRaidSV.ActiveRaids;
+            var list = RaidListSync.Snapshot(RaidList);
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];

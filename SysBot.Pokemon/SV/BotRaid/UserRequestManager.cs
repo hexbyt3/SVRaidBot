@@ -14,7 +14,8 @@ public class UserRequestManager
         var directoryPath = Path.Combine(baseDirectory, "raidfilessv");
         Directory.CreateDirectory(directoryPath);
         filePath = Path.Combine(directoryPath, "user_requests.json");
-        Load();
+        lock (FileLock)
+            Load();
     }
 
     private void Load()
@@ -37,37 +38,56 @@ public class UserRequestManager
         File.WriteAllText(filePath, json);
     }
 
+    // Commands run on several threads and each one reads and writes the same file.
+    private static readonly object FileLock = new();
+
+    /// <summary>
+    /// Whether the user may request now. Does not count anything; call
+    /// <see cref="RecordRequest"/> once the request is actually queued.
+    /// </summary>
     public bool CanRequest(ulong userId, int limit, int cooldown, out TimeSpan remainingCooldown)
     {
         remainingCooldown = TimeSpan.Zero;
-
-        if (userRequests.TryGetValue(userId, out var info))
+        lock (FileLock)
         {
-            if (info.RequestCount >= limit)
+            Load();
+            if (!userRequests.TryGetValue(userId, out var info) || info.RequestCount < limit)
+                return true;
+
+            var timeSinceLimit = DateTime.UtcNow - info.RequestLimitTime;
+            if (timeSinceLimit < TimeSpan.FromMinutes(cooldown))
             {
-                var timeSinceLimit = DateTime.UtcNow - info.RequestLimitTime;
-                if (timeSinceLimit < TimeSpan.FromMinutes(cooldown))
-                {
-                    remainingCooldown = TimeSpan.FromMinutes(cooldown) - timeSinceLimit;
-                    return false;
-                }
+                remainingCooldown = TimeSpan.FromMinutes(cooldown) - timeSinceLimit;
+                return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Counts a request that made it into the queue.
+    /// </summary>
+    public void RecordRequest(ulong userId, int limit, int cooldown)
+    {
+        lock (FileLock)
+        {
+            Load();
+            if (!userRequests.TryGetValue(userId, out var info))
+            {
+                info = new UserRequestInfo { UserId = userId };
+                userRequests.Add(userId, info);
+            }
+            else if (info.RequestCount >= limit && DateTime.UtcNow - info.RequestLimitTime >= TimeSpan.FromMinutes(cooldown))
+            {
                 info.RequestCount = 0; // Reset count after cooldown
             }
-        }
-        else
-        {
-            info = new UserRequestInfo { UserId = userId };
-            userRequests.Add(userId, info);
-        }
 
-        info.RequestCount++;
-        if (info.RequestCount == limit)
-        {
-            info.RequestLimitTime = DateTime.UtcNow;
-        }
+            info.RequestCount++;
+            if (info.RequestCount == limit)
+                info.RequestLimitTime = DateTime.UtcNow;
 
-        Save();
-        return true;
+            Save();
+        }
     }
 }
 

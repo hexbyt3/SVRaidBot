@@ -112,6 +112,10 @@ namespace SysBot.Pokemon
             [Browsable(false)]
             public ulong RequestedByUserID { get; set; }
 
+            // Set by a command to remove this raid; the hosting loop removes it between raids.
+            [Browsable(false)]
+            public bool PendingRemoval { get; set; }
+
             [Browsable(false)]
             [System.Text.Json.Serialization.JsonIgnore]
             public SocketUser? User { get; set; }

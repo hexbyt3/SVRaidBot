@@ -164,8 +164,12 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Requests saved into config.json by a crash or a killed process come
             // back without their Discord user or web lease, so nobody could be
             // told about them and the site has already moved on.
-            int orphaned = _settings.ActiveRaids.RemoveAll(p =>
-                p.AddedByRACommand && !p.Title.Contains(MysteryRaidTitle) && p.User is null && p.WebRequest is null);
+            int orphaned;
+            lock (RaidListSync.Gate)
+            {
+                orphaned = _settings.ActiveRaids.RemoveAll(p => p.PendingRemoval ||
+                    (p.AddedByRACommand && !p.Title.Contains(MysteryRaidTitle) && p.User is null && p.WebRequest is null));
+            }
             if (orphaned > 0)
                 Log($"Removed {orphaned} raid request(s) left over from the last session.");
 
@@ -419,11 +423,11 @@ namespace SysBot.Pokemon.SV.BotRaid
                     Action1Delay = 5
                 };
 
-                _settings.ActiveRaids.Add(newShinyRaid);
+                lock (RaidListSync.Gate) _settings.ActiveRaids.Add(newShinyRaid);
                 Log($"Added Default Shiny Raid - Species: {(Species)pk.Species}, Form: {pk.Form}, Seed: {seedValue}, Difficulty: {difficultyLevel}★");
             }
 
-            int successfulRaids = _settings.ActiveRaids.Count(r => r.Title.StartsWith("Shiny"));
+            int successfulRaids = RaidListSync.Snapshot(_settings.ActiveRaids).Count(r => r.Title.StartsWith("Shiny"));
             Log($"{successfulRaids} default shiny raids have been added. Bot will continue operating normally.");
         }
 
@@ -474,7 +478,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             if (!_settings.RaidSettings.SaveSeedsToFile)
                 return;
 
-            var raidsToSave = _settings.ActiveRaids.Where(raid => !raid.AddedByRACommand).ToList();
+            var raidsToSave = RaidListSync.Snapshot(_settings.ActiveRaids).Where(raid => !raid.AddedByRACommand).ToList();
 
             if (!raidsToSave.Any())
                 return;
@@ -510,7 +514,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// <param name="data">Additional Pokemon data</param>
         private void DirectorySearch(string sDir, string data)
         {
-            _settings.ActiveRaids.Clear();
+            lock (RaidListSync.Gate) _settings.ActiveRaids.Clear();
 
             string contents = File.ReadAllText(sDir);
             string[] monInfo = contents.Split(Separator, StringSplitOptions.RemoveEmptyEntries);
@@ -560,7 +564,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                     StoryProgress = (GameProgressEnum)convertedStoryProgressLevel
                 };
 
-                _settings.ActiveRaids.Add(param);
+                lock (RaidListSync.Gate) _settings.ActiveRaids.Add(param);
                 Log($"Parameters generated from text file for {monTitle}.");
             }
         }
@@ -962,6 +966,18 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Mark embed as inactive since nobody joined
             await SharedRaidCodeHandler.UpdateReactionsOnAllMessages(false, token);
 
+            var raidNow = _settings.ActiveRaids[_currentRaidIndex];
+            bool isUserRequest = raidNow.AddedByRACommand && raidNow.Title.Contains(UserRequestedRaidSuffix);
+            int requestLobbyLimit = Math.Max(1, _settings.LobbyOptions.SkipRaidLimit);
+            if (isUserRequest && _settings.LobbyOptions.LobbyMethod != LobbyMethodOptions.SkipRaid && _lostRaid >= requestLobbyLimit)
+            {
+                Log($"Nobody joined the requested raid in {_lostRaid} lobbies. Moving on to the next raid.");
+                await SkipRaidOnLosses(token).ConfigureAwait(false);
+                _emptyRaid = 0;
+                _lostRaid = 0;
+                return;
+            }
+
             Log($"Nobody joined the raid. Current counts - Empty: {_emptyRaid}, Lost: {_lostRaid}");
             Log($"Lobby Method: {_settings.LobbyOptions.LobbyMethod}, Empty Limit: {_settings.LobbyOptions.EmptyRaidLimit}, Skip Limit: {_settings.LobbyOptions.SkipRaidLimit}");
 
@@ -1040,7 +1056,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 // Silently handle directory deletion errors
             }
 
-            foreach (var web in _settings.ActiveRaids.Select(p => p.WebRequest).Where(w => w?.Host == this).ToList())
+            foreach (var web in RaidListSync.Snapshot(_settings.ActiveRaids).Select(p => p.WebRequest).Where(w => w?.Host == this).ToList())
             {
                 if (web!.IsHosted)
                     WebRequests.Report(web, "failed", "The host had to restart its game during your raid. You can request it again now.");
@@ -1049,8 +1065,8 @@ namespace SysBot.Pokemon.SV.BotRaid
             }
 
             // Another bot in this program may be holding its own web request; leave it alone.
-            _settings.ActiveRaids.RemoveAll(p => p.AddedByRACommand && (p.WebRequest is null || p.WebRequest.Host == this));
-            _settings.ActiveRaids.RemoveAll(p => p.Title == MysteryRaidTitle);
+            lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAll(p => p.AddedByRACommand && (p.WebRequest is null || p.WebRequest.Host == this));
+            lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAll(p => p.Title == MysteryRaidTitle);
             await WebRequests.Flush(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             await CleanExit(CancellationToken.None).ConfigureAwait(false);
         }
@@ -1435,7 +1451,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Create replacement Mystery Raid BEFORE advancing rotation (if needed)
             if (_settings.RaidSettings.MysteryRaids)
             {
-                int mysteryRaidCount = _settings.ActiveRaids.Count(raid => raid.Title.Contains(MysteryRaidTitle));
+                int mysteryRaidCount = RaidListSync.Snapshot(_settings.ActiveRaids).Count(raid => raid.Title.Contains(MysteryRaidTitle));
                 if (mysteryRaidCount <= 1)
                 {
                     try
@@ -1924,12 +1940,13 @@ namespace SysBot.Pokemon.SV.BotRaid
                 PartyPK = battlers.Length > 0 ? battlers : [""]
             };
 
-            // Find the last position of a raid added by the RA command
-            int lastRaCommandRaidIndex = _settings.ActiveRaids.FindLastIndex(raid => raid.AddedByRACommand);
-            int insertPosition = lastRaCommandRaidIndex != -1 ? lastRaCommandRaidIndex + 1 : _currentRaidIndex + 1;
-
-            // Insert the new raid at the determined position
-            _settings.ActiveRaids.Insert(insertPosition, newRandomShinyRaid);
+            // After the last waiting request, or right after the current raid
+            lock (RaidListSync.Gate)
+            {
+                int lastRaCommandRaidIndex = _settings.ActiveRaids.FindLastIndex(raid => raid.AddedByRACommand);
+                int insertPosition = lastRaCommandRaidIndex != -1 ? lastRaCommandRaidIndex + 1 : _currentRaidIndex + 1;
+                _settings.ActiveRaids.Insert(Math.Min(insertPosition, _settings.ActiveRaids.Count), newRandomShinyRaid);
+            }
 
             Log($"Added Mystery Raid - Species: {(Species)pk.Species}, Seed: {seedValue}.");
         }
@@ -2058,7 +2075,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// </summary>
         private async Task TryTakeWebRequest(CancellationToken token)
         {
-            _settings.ActiveRaids.RemoveAll(p => p.WebRequest is { Lost: true } && p.WebRequest.Host == this);
+            lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAll(p => p.WebRequest is { Lost: true } && p.WebRequest.Host == this);
 
             var raidSettings = _settings.RaidSettings;
             if (!raidSettings.HostGenPKMRequests || raidSettings.DisableRequests || _isPaused)
@@ -2118,7 +2135,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                     return;
                 }
 
-                _settings.ActiveRaids.Add(raid);
+                lock (RaidListSync.Gate) _settings.ActiveRaids.Add(raid);
                 WebRequests.Report(request, "preparing", $"{GetWebHostName()} is restarting its game and loading your seed.");
                 Log($"Picked up GenPKM request #{request.Id}: {raid.Species} ({request.Stars}★, seed {request.Seed}) for {request.RequesterName}.");
             }
@@ -2363,7 +2380,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 }
 
                 Log($"Raid for {_settings.ActiveRaids[_currentRaidIndex].Species} was {reason} and will be removed from the rotation list.");
-                _settings.ActiveRaids.RemoveAt(_currentRaidIndex);
+                lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAt(_currentRaidIndex);
                 Ensure_currentRaidIndexInBounds();
             }
         }
@@ -2376,6 +2393,12 @@ namespace SysBot.Pokemon.SV.BotRaid
             try
             {
                 await Task.Delay(50, token).ConfigureAwait(false);
+
+                // Raids a command asked to remove leave the list here, between raids,
+                // so no position the loop relies on shifts mid-raid.
+                int removed = RaidListSync.RemovePending(_settings.ActiveRaids, ref _currentRaidIndex);
+                if (removed > 0)
+                    Log($"Removed {removed} raid(s) from the list as requested.");
 
                 await TryTakeWebRequest(token).ConfigureAwait(false);
 
@@ -2516,7 +2539,7 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             // If no raid added by RA command was found, select a random enabled raid
             var random = new Random();
-            var enabledRaids = _settings.ActiveRaids.Where(r => r.ActiveInRotation).ToList();
+            var enabledRaids = RaidListSync.Snapshot(_settings.ActiveRaids).Where(r => r.ActiveInRotation).ToList();
             if (enabledRaids.Count > 0)
             {
                 int randomIndex = random.Next(enabledRaids.Count);
@@ -2715,7 +2738,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                     if (ours == false)
                     {
                         Log($"GenPKM request #{web.Id} went to another bot while this one was busy. Skipping it.");
-                        _settings.ActiveRaids.RemoveAt(_currentRaidIndex);
+                        lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAt(_currentRaidIndex);
                         Ensure_currentRaidIndexInBounds();
                         await SanitizeRotationCount(token).ConfigureAwait(false);
                         await CloseGame(_hub.Config, token).ConfigureAwait(false);
@@ -3656,7 +3679,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             if (!(upnext && _settings.RaidSettings.TotalRaidsToHost == 0))
             {
                 string programIconUrl = $"https://raw.githubusercontent.com/hexbyt3/sprites/main/imgs/icon4.png";
-                int raidsIn_currentRaidIndex = _hub.Config.RotatingRaidSV.ActiveRaids.Count(r => !r.AddedByRACommand);
+                int raidsIn_currentRaidIndex = RaidListSync.Snapshot(_hub.Config.RotatingRaidSV.ActiveRaids).Count(r => !r.AddedByRACommand);
 
                 // Calculate uptime
                 TimeSpan uptime = DateTime.Now - StartTime;
@@ -4865,7 +4888,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             // Create replacement Mystery Raid BEFORE advancing rotation (if needed)
             if (_settings.RaidSettings.MysteryRaids)
             {
-                int mysteryRaidCount = _settings.ActiveRaids.Count(raid => raid.Title.Contains(MysteryRaidTitle));
+                int mysteryRaidCount = RaidListSync.Snapshot(_settings.ActiveRaids).Count(raid => raid.Title.Contains(MysteryRaidTitle));
                 if (mysteryRaidCount <= 1)
                 {
                     try
@@ -5174,7 +5197,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                     catch (FormatException)
                     {
                         Log($"Invalid seed format detected. Removing {_settings.ActiveRaids[a].Seed} from list.");
-                        _settings.ActiveRaids.RemoveAt(a);
+                        lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAt(a);
                         a--;  // Decrement the index so that it does not skip the next element.
                         continue;  // Skip to the next iteration.
                     }
@@ -5322,7 +5345,10 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             var progress = storyProgressLevel;
             var raid_delivery_group_id = raidDeliveryGroupID;
             // The game caps event progress at 3, but never above the host's own progress.
-            var encounter = raid.GetTeraEncounter(Container, raid.IsEvent ? Math.Min(progress, 3) : progress, contentType == 3 ? 1 : raid_delivery_group_id);
+            var encounter = raid.GetTeraEncounter(Container, raid.IsEvent ? Math.Min(progress, 3) : progress, contentType == 3 ? 1 : raid_delivery_group_id)
+                ?? throw new InvalidOperationException(raid.IsEvent
+                    ? "no event raid in the loaded event data matches this seed"
+                    : "no raid encounter matches this seed at this story level");
             var reward = encounter.GetRewards(Container, raid, 0);
             var stars = raid.IsEvent ? encounter.Stars : raid.GetStarCount(raid.Difficulty, storyProgressLevel, raid.IsBlack);
             var teraType = raid.GetTeraType(encounter);
