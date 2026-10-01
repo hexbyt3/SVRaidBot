@@ -92,6 +92,9 @@ namespace SysBot.Pokemon.SV.BotRaid
                 }
 
                 var reply = await response.Content.ReadFromJsonAsync<ClaimReply>(cancellationToken: token).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(reply?.Notice) && reply.Notice != _lastNotice)
+                    _log($"GenPKM raid requests: {reply.Notice}");
+                _lastNotice = reply?.Notice;
                 if (reply?.Request is null)
                     return (WebClaimResult.NothingWaiting, null);
                 return (WebClaimResult.Claimed, reply.Request);
@@ -227,9 +230,12 @@ namespace SysBot.Pokemon.SV.BotRaid
             }
         }
 
+        private string? _lastNotice;
+
         private sealed class ClaimReply
         {
             [JsonPropertyName("request")] public WebRaidRequest? Request { get; set; }
+            [JsonPropertyName("notice")] public string? Notice { get; set; }
         }
 
         private sealed record Update(

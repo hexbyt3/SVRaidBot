@@ -58,11 +58,16 @@ namespace SysBot.Pokemon.WinForms
                 return;
             string discordName = string.Empty;
 
-            // Update checker - check silently on startup
+            // Update checker - check silently on startup; a required update blocks loading any bot
             try
             {
-                var (updateAvailable, _, _) = await UpdateChecker.CheckForUpdatesAsync(forceShow: false);
+                var (updateAvailable, updateRequired, newVersion) = await UpdateChecker.CheckForUpdatesAsync(forceShow: false);
                 hasUpdate = updateAvailable;
+                if (updateRequired)
+                {
+                    ShowRequiredUpdate(newVersion);
+                    return;
+                }
             }
             catch { /* Ignore update check errors on startup */ }
 
@@ -372,11 +377,28 @@ namespace SysBot.Pokemon.WinForms
             {
                 try
                 {
-                    var (updateAvailable, _, _) = await UpdateChecker.CheckForUpdatesAsync(forceShow: false);
+                    var (updateAvailable, updateRequired, newVersion) = await UpdateChecker.CheckForUpdatesAsync(forceShow: false);
                     hasUpdate = updateAvailable;
+                    if (updateRequired && !_requiredUpdateShown)
+                    {
+                        LogUtil.LogInfo($"Required update {newVersion} is out. Stopping the bots until it is installed.", "Update");
+                        RunningEnvironment.StopAll();
+                        ShowRequiredUpdate(newVersion);
+                    }
                 }
                 catch { /* Ignore update check errors */ }
             };
+        }
+
+        private bool _requiredUpdateShown;
+
+        private void ShowRequiredUpdate(string newVersion)
+        {
+            _requiredUpdateShown = true;
+            using (var form = new UpdateForm(true, newVersion, true))
+                form.ShowDialog(this);
+            // Either the installer is taking over or the host skipped a required update.
+            Application.Exit();
         }
 
         private void RefreshMap_Click(object sender, EventArgs e)

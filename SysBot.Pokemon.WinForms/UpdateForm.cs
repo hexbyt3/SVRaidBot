@@ -238,11 +238,12 @@ namespace SysBot.Pokemon.WinForms
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             base.OnFormClosing(e);
-            if (isUpdateRequired && e.CloseReason == CloseReason.UserClosing)
+            if (isUpdateRequired && e.CloseReason == CloseReason.UserClosing && !Main.IsUpdating)
             {
-                e.Cancel = true;
-                MessageBox.Show("This update is required. Please download and install the new version to continue using the application.",
-                    "Update Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                var answer = MessageBox.Show("This update is required. SVRaidBot will close if you skip it. Close SVRaidBot now?",
+                    "Update Required", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (answer != DialogResult.Yes)
+                    e.Cancel = true;
             }
         }
     }

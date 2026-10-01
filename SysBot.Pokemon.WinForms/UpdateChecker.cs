@@ -28,7 +28,7 @@ namespace SysBot.Pokemon.WinForms
             }
 
             bool updateAvailable = latestRelease.TagName != SVRaidBot.Version;
-            bool updateRequired = latestRelease.Prerelease == false && IsUpdateRequired(latestRelease.Body);
+            bool updateRequired = updateAvailable && UpdateRules.IsRequired(await FetchReleasesAsync(), SVRaidBot.Version);
             string? newVersion = latestRelease.TagName;
 
             if (forceShow)
@@ -96,10 +96,21 @@ namespace SysBot.Pokemon.WinForms
             }
         }
 
-        private static bool IsUpdateRequired(string? changelogBody)
+        private static async Task<List<(string? Tag, string? Body, bool Prerelease)>> FetchReleasesAsync()
         {
-            return !string.IsNullOrWhiteSpace(changelogBody) &&
-                   changelogBody.Contains("Required = Yes", StringComparison.OrdinalIgnoreCase);
+            using var client = new HttpClient();
+            try
+            {
+                client.DefaultRequestHeaders.Add("User-Agent", "SVRaidBot");
+                var json = await client.GetStringAsync($"https://api.github.com/repos/{RepositoryOwner}/{RepositoryName}/releases?per_page=50");
+                var releases = JsonConvert.DeserializeObject<List<ReleaseInfo>>(json) ?? [];
+                return releases.Select(r => (r.TagName, r.Body, r.Prerelease)).ToList();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error fetching release list: {ex.Message}");
+                return [];
+            }
         }
 
         private class ReleaseInfo
