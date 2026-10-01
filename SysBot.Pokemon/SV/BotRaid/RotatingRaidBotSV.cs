@@ -102,6 +102,11 @@ namespace SysBot.Pokemon.SV.BotRaid
         private bool _isRecoveringFromReboot;
         private volatile bool _isPaused = false;
 
+        private static readonly WebRaidRequestClient WebRequests = new(msg => LogUtil.LogInfo(msg, "GenPKM"));
+        private DateTime _nextWebClaimAllowed = DateTime.MinValue;
+        private bool _warnedWebNotApproved;
+        private bool _warnedWebMultipleBots;
+
         private int _consecutiveDenFailures = 0;
         private int _lastFailedDenIndex = -1;
 
@@ -139,6 +144,14 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             // Clear pause state when starting
             _isPaused = false;
+
+            // Requests saved into config.json by a crash or a killed process come
+            // back without their Discord user or web lease, so nobody could be
+            // told about them and the site has already moved on.
+            int orphaned = _settings.ActiveRaids.RemoveAll(p =>
+                p.AddedByRACommand && !p.Title.Contains(MysteryRaidTitle) && p.User is null && p.WebRequest is null);
+            if (orphaned > 0)
+                Log($"Removed {orphaned} raid request(s) left over from the last session.");
 
             if (_settings.RaidSettings.GenerateRaidsFromFile)
             {
@@ -864,6 +877,15 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// </summary>
         private async Task HandleRACommandRaid(CancellationToken token)
         {
+            var web = CurrentWebRequest;
+            if (web != null)
+            {
+                var webCode = await GetRaidCode(token).ConfigureAwait(false);
+                WebRequests.Report(web, "lobby", $"Your lobby is open. The host is {GetWebHostName()}.", webCode);
+                Log($"Sent the raid code to GenPKM request #{web.Id}.");
+                return;
+            }
+
             var user = _settings.ActiveRaids[_currentRaidIndex].User;
             var mentionedUsers = _settings.ActiveRaids[_currentRaidIndex].MentionedUsers;
 
@@ -897,6 +919,18 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// </summary>
         private async Task HandleEmptyLobby(CancellationToken token)
         {
+            if (CurrentWebRequest != null)
+            {
+                // A requested raid gets one lobby. The member can ask again
+                // right away, and the bot is free for the next request.
+                Log("Nobody joined the GenPKM requested raid. Moving on to the next raid.");
+                await SharedRaidCodeHandler.UpdateReactionsOnAllMessages(false, token);
+                await SkipRaidOnLosses(token).ConfigureAwait(false);
+                _emptyRaid = 0;
+                _lostRaid = 0;
+                return;
+            }
+
             _emptyRaid++;
             _lostRaid++;
 
@@ -981,8 +1015,18 @@ namespace SysBot.Pokemon.SV.BotRaid
                 // Silently handle directory deletion errors
             }
 
-            _settings.ActiveRaids.RemoveAll(p => p.AddedByRACommand);
+            foreach (var web in _settings.ActiveRaids.Select(p => p.WebRequest).Where(w => w?.Host == this).ToList())
+            {
+                if (web!.IsHosted)
+                    WebRequests.Report(web, "failed", "The host had to restart its game during your raid. You can request it again now.");
+                else
+                    WebRequests.Report(web, "released", "The raid bot had to restart before hosting your raid. You are back in line for the next free bot.");
+            }
+
+            // Another bot in this program may be holding its own web request; leave it alone.
+            _settings.ActiveRaids.RemoveAll(p => p.AddedByRACommand && (p.WebRequest is null || p.WebRequest.Host == this));
             _settings.ActiveRaids.RemoveAll(p => p.Title == MysteryRaidTitle);
+            await WebRequests.Flush(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             await CleanExit(CancellationToken.None).ConfigureAwait(false);
         }
 
@@ -1003,6 +1047,9 @@ namespace SysBot.Pokemon.SV.BotRaid
                     await ReOpenGame(_hub.Config, token);
                     return; // Exit early without throwing exception
                 }
+
+                if (CurrentWebRequest is { } web)
+                    WebRequests.Report(web, "battling", "The raid battle has started.");
 
                 var screenshotDelay = (int)_settings.EmbedToggles.ScreenshotTiming;
                 await Task.Delay(screenshotDelay, token).ConfigureAwait(false);
@@ -1025,6 +1072,8 @@ namespace SysBot.Pokemon.SV.BotRaid
                 if (partyDipped)
                 {
                     Log("Party has left after joining. Restarting game.");
+                    if (CurrentWebRequest is { } dipped)
+                        dipped.OutcomeOverride = ("missed", "Everyone left the lobby before the battle started. You can request it again now.");
 
                     // Skip HandleEndOfRaidActions and go straight to FinalizeRaidCompletion
                     await ReOpenGame(_hub.Config, token);
@@ -1337,9 +1386,13 @@ namespace SysBot.Pokemon.SV.BotRaid
                 Log("Failed to return to overworld after raid, rebooting game");
                 await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
 
-                // After rebooting, attempt to continue with the raid rotation
+                // After rebooting, attempt to continue with the raid rotation.
+                // The battle already happened, so a requested raid is done and
+                // must not be hosted a second time.
                 if (ready)
                 {
+                    RemoveTemporaryRaidIfNeeded("completed");
+                    await SanitizeRotationCount(token).ConfigureAwait(false);
                     await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
 
                     if (_settings.RaidSettings.KeepDaySeed)
@@ -1946,6 +1999,188 @@ namespace SysBot.Pokemon.SV.BotRaid
         }
 
         /// <summary>
+        /// The GenPKM request behind the raid being hosted now, if it is one
+        /// </summary>
+        private WebRaidRequest? CurrentWebRequest =>
+            _currentRaidIndex >= 0 && _currentRaidIndex < _settings.ActiveRaids.Count
+                ? _settings.ActiveRaids[_currentRaidIndex].WebRequest
+                : null;
+
+        private string GetWebHostName()
+        {
+            var name = _settings.RaidSettings.GenPKMHostName;
+            if (string.IsNullOrWhiteSpace(name))
+                name = _hostSAV.OT;
+            return string.IsNullOrWhiteSpace(name) ? "Raid bot" : name.Trim();
+        }
+
+        /// <summary>
+        /// Stable per install and per console, so the site can tell this bot
+        /// apart from a copy of the same config running another Switch.
+        /// </summary>
+        private string GetWebBotId()
+        {
+            if (string.IsNullOrEmpty(_settings.RaidSettings.GenPKMBotId))
+                _settings.RaidSettings.GenPKMBotId = Guid.NewGuid().ToString("N");
+
+            // The console's address stays on this PC; only a short hash of it is sent.
+            var console = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Config.Connection.ToString())))[..12];
+            return $"{_settings.RaidSettings.GenPKMBotId[..16]}-{console}";
+        }
+
+        private static TeraRaidMapParent CurrentMap =>
+            IsBlueberry ? TeraRaidMapParent.Blueberry : IsKitakami ? TeraRaidMapParent.Kitakami : TeraRaidMapParent.Paldea;
+
+        /// <summary>
+        /// Asks genpkm.com for a member's raid request when nothing else is
+        /// waiting, and queues it as the next raid. Never throws: a missing or
+        /// slow site must not interrupt hosting.
+        /// </summary>
+        private async Task TryTakeWebRequest(CancellationToken token)
+        {
+            _settings.ActiveRaids.RemoveAll(p => p.WebRequest is { Lost: true } && p.WebRequest.Host == this);
+
+            var raidSettings = _settings.RaidSettings;
+            if (!raidSettings.HostGenPKMRequests || raidSettings.DisableRequests || _isPaused)
+                return;
+            if (DateTime.Now < _nextWebClaimAllowed || FindNextUserRequestedRaid() != -1)
+                return;
+            if (Container is null || string.IsNullOrEmpty(Container.Game))
+                return;
+
+            // Map, game and event data are shared by every raid bot in this
+            // program, so with two consoles neither could promise the right map.
+            if (_hub.Bots.CountWhere(b => b.Config.CurrentRoutineType != PokeRoutineType.Idle) > 1)
+            {
+                if (!_warnedWebMultipleBots)
+                    Log("GenPKM raid requests are off: they need one raid bot per program window.");
+                _warnedWebMultipleBots = true;
+                return;
+            }
+
+            try
+            {
+                var map = CurrentMap;
+                var info = new WebRaidBotInfo(
+                    GetWebBotId(),
+                    GetWebHostName(),
+                    Helpers.SVRaidBot.Version,
+                    Container.Game,
+                    map.ToString(),
+                    map == TeraRaidMapParent.Paldea ? [.. SpeciesToGroupIDMap.Keys] : []);
+
+                // The previous request's done/missed report must land first, or
+                // the site reads this claim as a bot that crashed mid-raid.
+                await WebRequests.Flush(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                var (result, request) = await WebRequests.TryClaim(info, token).ConfigureAwait(false);
+                switch (result)
+                {
+                    case WebClaimResult.NotApproved:
+                        if (!_warnedWebNotApproved)
+                            Log("GenPKM raid requests: this host is not approved yet, so it will not receive requests. Checking again every 30 minutes.");
+                        _warnedWebNotApproved = true;
+                        _nextWebClaimAllowed = DateTime.Now.AddMinutes(30);
+                        return;
+                    case WebClaimResult.Unreachable:
+                        _nextWebClaimAllowed = DateTime.Now.AddMinutes(2);
+                        return;
+                    case WebClaimResult.NothingWaiting:
+                        _warnedWebNotApproved = false;
+                        return;
+                }
+
+                request!.Host = this;
+                var (raid, problem, giveBack) = BuildWebRaid(request, map);
+                if (raid is null)
+                {
+                    Log($"GenPKM request #{request.Id} could not be hosted: {problem}");
+                    WebRequests.Report(request, giveBack ? "released" : "rejected", problem);
+                    return;
+                }
+
+                _settings.ActiveRaids.Add(raid);
+                WebRequests.Report(request, "preparing", $"{GetWebHostName()} is restarting its game and loading your seed.");
+                Log($"Picked up GenPKM request #{request.Id}: {raid.Species} ({request.Stars}★, seed {request.Seed}) for {request.RequesterName}.");
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Log($"GenPKM raid requests: {ex.Message}");
+                _nextWebClaimAllowed = DateTime.Now.AddMinutes(2);
+            }
+        }
+
+        /// <summary>
+        /// Turns a claimed request into a raid entry after checking it against
+        /// this console's game. Returns the reason and whether another bot
+        /// could still host it when this one can't.
+        /// </summary>
+        private (RotatingRaidParameters? Raid, string Problem, bool GiveBack) BuildWebRaid(WebRaidRequest request, TeraRaidMapParent map)
+        {
+            if (!WebRaidRules.IsValidSeed(request.Seed) || !WebRaidRules.StarsFitProgress(request.Stars, request.StoryProgress))
+                return (null, "The seed or difficulty in this request is not valid.", false);
+
+            int groupId = -1;
+            if (request.IsEvent)
+            {
+                if (map != TeraRaidMapParent.Paldea)
+                    return (null, "Event raids only run in Paldea.", true);
+                if (string.IsNullOrWhiteSpace(request.Species) || !SpeciesToGroupIDMap.TryGetValue(request.Species, out var groups) || groups.Count == 0)
+                    return (null, $"This bot no longer has the {request.Species} event.", true);
+                groupId = groups[0].GroupID;
+            }
+
+            var crystal = WebRaidRules.CrystalFor(request.Stars, request.IsEvent);
+            var embedSettings = _settings.EmbedToggles;
+            PK9 pk;
+            Embed embed;
+            try
+            {
+                (pk, embed) = RaidInfoCommand(request.Seed, (int)crystal, map, request.StoryProgress, groupId,
+                    embedSettings.RewardsToShow, embedSettings.MoveTypeEmojis, embedSettings.CustomTypeEmojis,
+                    0, request.IsEvent, (int)embedSettings.EmbedLanguage);
+            }
+            catch (Exception ex)
+            {
+                return (null, $"Seed {request.Seed} does not make a {request.Stars}★ raid here ({ex.Message}).", false);
+            }
+
+            if (pk.Species == 0)
+                return (null, "The bot has not finished reading its raid data yet.", true);
+
+            var made = (Species)pk.Species;
+            if (!request.IsEvent && !string.IsNullOrWhiteSpace(request.Species) && !WebRaidRules.SameSpecies(request.Species, made.ToString()))
+            {
+                return (null, $"On {Container!.Game} in {map} with that story progress, seed {request.Seed} makes {made}, not {request.Species}. " +
+                    "Check the game, map and story progress you searched with.", false);
+            }
+
+            var battlers = GetBattlerForTeraType(ExtractTeraTypeFromEmbed(embed));
+            var raid = new RotatingRaidParameters
+            {
+                CrystalType = crystal,
+                Description = [""],
+                PartyPK = made == Species.Ditto ? ["Happiny", "Shiny: Yes", "Level: 1"] : battlers.Length > 0 ? battlers : [""],
+                Species = made,
+                SpeciesForm = pk.Form,
+                DifficultyLevel = request.Stars,
+                StoryProgress = (GameProgressEnum)(request.StoryProgress - 1),
+                Seed = request.Seed.ToUpperInvariant(),
+                IsCoded = true,
+                IsShiny = pk.IsShiny,
+                GroupID = groupId,
+                AddedByRACommand = true,
+                RequestCommand = $"genpkm.com request #{request.Id}",
+                Title = $"A GenPKM Member{UserRequestedRaidSuffix}{(request.IsEvent ? $" ({request.Species} Event Raid)" : "")}",
+                WebRequest = request,
+            };
+            return (raid, string.Empty, false);
+        }
+
+        /// <summary>
         /// Determines if the current raid should be treated as free-for-all (no code required)
         /// </summary>
         /// <returns>True if the raid should be free-for-all, false if it should use a raid code</returns>
@@ -1954,7 +2189,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             var currentRaid = _settings.ActiveRaids[_currentRaidIndex];
 
             // If raid is not coded at all, it's not a "free-for-all" - it's just uncoded
-            if (!currentRaid.IsCoded)
+            if (!currentRaid.IsCoded || currentRaid.WebRequest != null)
                 return false;
 
             // If we've hit the empty raid limit and OpenLobby is enabled, make it free-for-all
@@ -2002,7 +2237,8 @@ namespace SysBot.Pokemon.SV.BotRaid
             return _settings.ActiveRaids.FindIndex(r =>
                 r.AddedByRACommand &&
                 !r.Title.Contains(MysteryRaidTitle) &&
-                r.ActiveInRotation);
+                r.ActiveInRotation &&
+                (r.WebRequest is null || (r.WebRequest.Host == this && !r.WebRequest.Lost)));
         }
 
         /// <summary>
@@ -2088,6 +2324,14 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             if (IsTemporaryRaid())
             {
+                if (_settings.ActiveRaids[_currentRaidIndex].WebRequest is { } web)
+                {
+                    var (status, message) = web.OutcomeOverride ?? (reason == "completed"
+                        ? ("done", "Your raid is complete. You can request another one now.")
+                        : ("missed", "Nobody joined the lobby before it closed. You can request it again now."));
+                    WebRequests.Report(web, status, message);
+                }
+
                 Log($"Raid for {_settings.ActiveRaids[_currentRaidIndex].Species} was {reason} and will be removed from the rotation list.");
                 _settings.ActiveRaids.RemoveAt(_currentRaidIndex);
                 Ensure_currentRaidIndexInBounds();
@@ -2102,6 +2346,8 @@ namespace SysBot.Pokemon.SV.BotRaid
             try
             {
                 await Task.Delay(50, token).ConfigureAwait(false);
+
+                await TryTakeWebRequest(token).ConfigureAwait(false);
 
                 if (NoActiveRaids)
                 {
@@ -2422,7 +2668,30 @@ namespace SysBot.Pokemon.SV.BotRaid
                 _seedMismatchCount = 0;
             }
 
-            if (_settings.ActiveRaids[_currentRaidIndex].AddedByRACommand)
+            if (CurrentWebRequest is { } web)
+            {
+                // Make sure the request is still ours before opening a lobby for
+                // it: after a long pause the site may have handed it to another
+                // bot. A re-host after a failed battle start skips this and goes
+                // straight to a new lobby code; the site does not accept a step
+                // backward.
+                if (!web.IsHosted)
+                {
+                    var ours = await WebRequests.Confirm(web, "preparing",
+                        "Your seed is loaded. The lobby opens in a few seconds, so get to the Tera Raid screen.", token).ConfigureAwait(false);
+                    if (ours == false)
+                    {
+                        Log($"GenPKM request #{web.Id} went to another bot while this one was busy. Skipping it.");
+                        _settings.ActiveRaids.RemoveAt(_currentRaidIndex);
+                        Ensure_currentRaidIndexInBounds();
+                        await SanitizeRotationCount(token).ConfigureAwait(false);
+                        await CloseGame(_hub.Config, token).ConfigureAwait(false);
+                        await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
+                        return 2;
+                    }
+                }
+            }
+            else if (_settings.ActiveRaids[_currentRaidIndex].AddedByRACommand)
             {
                 var user = _settings.ActiveRaids[_currentRaidIndex].User;
                 var mentionedUsers = _settings.ActiveRaids[_currentRaidIndex].MentionedUsers;
@@ -3116,8 +3385,8 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             if (TypeAdvantages.ContainsKey(teraType.ToLower()))
                 return teraType.ToLower();
-            var englishStrings = GameInfo.GetStrings(2);
-            var localizedStrings = GameInfo.GetStrings((int)_settings.EmbedToggles.EmbedLanguage);
+            var englishStrings = GameInfo.GetStrings("en");
+            var localizedStrings = GameInfo.GetStrings(((LanguageID)_settings.EmbedToggles.EmbedLanguage).GetLanguageCode());
             for (int i = 0; i < localizedStrings.Types.Count; i++)
             {
                 if (string.Equals(teraType, localizedStrings.Types[i], StringComparison.OrdinalIgnoreCase))
@@ -3159,21 +3428,13 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Determine if the raid should use a code or be "Free For All"
             if (_settings.ActiveRaids[_currentRaidIndex].IsCoded)
             {
-                // Raid is configured to be coded
-                if (_emptyRaid < _settings.LobbyOptions.EmptyRaidLimit)
+                if (IsFreeForAllRaid())
                 {
-                    // Haven't hit empty raid limit yet, use a code
-                    code = await GetRaidCode(token).ConfigureAwait(false);
-                }
-                else if (_settings.LobbyOptions.LobbyMethod == LobbyMethodOptions.OpenLobby)
-                {
-                    // Hit empty raid limit and OpenLobby mode enabled, make it free for all
                     code = "Free For All";
                     Log($"Empty raid limit reached ({_settings.LobbyOptions.EmptyRaidLimit}). Opening coded raid to all.");
                 }
                 else
                 {
-                    // Hit empty raid limit but not in OpenLobby mode, still use code
                     code = await GetRaidCode(token).ConfigureAwait(false);
                 }
             }
@@ -3182,6 +3443,11 @@ namespace SysBot.Pokemon.SV.BotRaid
                 // Raid is configured as uncoded - no code needed
                 code = string.Empty;
             }
+
+            // A GenPKM request's code belongs to the member who asked for it:
+            // no code, no code reaction and no lobby screenshot (the Switch shows
+            // the code on screen) may reach Discord or the shared raid feed.
+            bool privateCode = _settings.ActiveRaids[_currentRaidIndex].WebRequest != null;
 
             // Apply delay only if the raid was added by RA command, not a Mystery Shiny Raid, and has a code
             if (_settings.ActiveRaids[_currentRaidIndex].AddedByRACommand &&
@@ -3215,7 +3481,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             bool shouldTakeScreenshot = _settings.EmbedToggles.TakeScreenshot && !upnext &&
                 (!isRaidStartingWithCountdown || (!_settings.EmbedToggles.HideRaidCode && code != "Free For All"));
 
-            if (!disband && names is not null && !upnext && _settings.EmbedToggles.TakeScreenshot)
+            if (!privateCode && !disband && names is not null && !upnext && _settings.EmbedToggles.TakeScreenshot)
             {
                 try
                 {
@@ -3233,7 +3499,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                     Log($"Error while capturing screenshots: {ex.Message}");
                 }
             }
-            else if (shouldTakeScreenshot)
+            else if (shouldTakeScreenshot && !privateCode)
             {
                 try
                 {
@@ -3259,7 +3525,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             var turl = string.Empty;
             Log($"Rotation Count: {_currentRaidIndex} | Species is {_settings.ActiveRaids[_currentRaidIndex].Species}");
             if (!disband && !upnext && !raidstart)
-                Log($"Raid Code is: {code}");
+                Log(privateCode ? "Raid Code sent privately to the GenPKM member." : $"Raid Code is: {code}");
             PK9 pk = new()
             {
                 Species = (ushort)_settings.ActiveRaids[_currentRaidIndex].Species,
@@ -3337,7 +3603,9 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Set title based on condition
             if (disband)
             {
-                embed.Title = $"**{EmbedLanguageManager.GetLocalizedText("Raid canceled", language)}: [{_teraRaidCode}]**";
+                embed.Title = privateCode
+                    ? $"**{EmbedLanguageManager.GetLocalizedText("Raid canceled", language)}**"
+                    : $"**{EmbedLanguageManager.GetLocalizedText("Raid canceled", language)}: [{_teraRaidCode}]**";
             }
             else if (upnext && _settings.RaidSettings.TotalRaidsToHost != 0)
             {
@@ -3481,7 +3749,15 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             if (!disband && names is null && !upnext)
             {
-                if (code == "Free For All")
+                if (privateCode)
+                {
+                    string fieldName = _settings.EmbedToggles.IncludeCountdown
+                        ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
+                        : $"**{EmbedLanguageManager.GetLocalizedText("Waiting in lobby", language)}!**";
+
+                    embed.AddField(fieldName, "🔒 Private raid requested on genpkm.com", true);
+                }
+                else if (code == "Free For All")
                 {
                     string fieldName = _settings.EmbedToggles.IncludeCountdown
                         ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
@@ -3548,7 +3824,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             }
 
             // Only add reaction instructions if HideRaidCode is true
-            if (!disband && names is null && !upnext && !raidstart && code != "Free For All" && _settings.EmbedToggles.HideRaidCode)
+            if (!privateCode && !disband && names is null && !upnext && !raidstart && code != "Free For All" && _settings.EmbedToggles.HideRaidCode)
             {
                 // Add a field with code information for reaction system
                 string fieldName = $"**__{EmbedLanguageManager.GetLocalizedText("Raid Code", language)}__**";
@@ -3570,6 +3846,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 !upnext &&
                 !raidstart &&
                 !disband &&
+                !privateCode &&
                 _settings.EmbedToggles.HideRaidCode; // Only use reactions if hiding code
 
             if (isInitialCodedRaidAnnouncement)
@@ -3869,7 +4146,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         /// </summary>
         private async Task CurrentRaidInfo(List<string>? names, string code, bool hatTrick, bool disband, bool upnext, bool raidstart, string? imageUrl, bool lobbyFull, CancellationToken token)
         {
-            if (!_settings.RaidSettings.JoinSharedRaidsProgram)
+            if (!_settings.RaidSettings.JoinSharedRaidsProgram || CurrentWebRequest != null)
                 return;
 
             string? encryptedCode = null;
@@ -5021,7 +5298,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             Encounter9RNG.GenerateData(pk, param, EncounterCriteria.Unrestricted, raid.Seed);
 
             // Get strings in the selected language
-            var strings = GameInfo.GetStrings(languageId);
+            var strings = GameInfo.GetStrings(((LanguageID)languageId).GetLanguageCode());
             var useTypeEmojis = moveTypeEmojis;
             var typeEmojis = customTypeEmojis
                 .Where(e => !string.IsNullOrEmpty(e.EmojiCode))
@@ -5111,7 +5388,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                           $"{Format.Bold($"Ability:")} {strings.Ability[pk.Ability]}\n" +
                           $"{Format.Bold("Nature:")} {strings.Natures[(int)pk.Nature]}\n" +
                           $"{Format.Bold("IVs:")} {pk.IV_HP}/{pk.IV_ATK}/{pk.IV_DEF}/{pk.IV_SPA}/{pk.IV_SPD}/{pk.IV_SPE}\n" +
-                          $"{Format.Bold($"Scale:")} {PokeSizeDetailedUtil.GetSizeRating(pk.Scale)}";
+                          $"{Format.Bold($"Scale:")} {ScaleLabel(pk.Scale)}";
                 x.IsInline = true;
             });
 
@@ -5150,7 +5427,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 auth.Name = authorName;
                 auth.IconUrl = teraIconUrl;
             });
-            var englishStrings = GameInfo.GetStrings(2);
+            var englishStrings = GameInfo.GetStrings("en");
             var englishMovesList = new StringBuilder();
             var englishExtraMovesList = new StringBuilder();
             for (int i = 0; i < 4; i++)
@@ -5188,10 +5465,19 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             RaidEmbedEnglishHelpers.RaidSpeciesTeraType = englishStrings.Types[teraType];
             RaidEmbedEnglishHelpers.Moves = englishMovesList.ToString().TrimEnd();
             RaidEmbedEnglishHelpers.ExtraMoves = englishExtraMovesList.ToString().TrimEnd();
-            RaidEmbedEnglishHelpers.ScaleText = PokeSizeDetailedUtil.GetSizeRating(pk.Scale).ToString();
+            RaidEmbedEnglishHelpers.ScaleText = ScaleLabel(pk.Scale);
             RaidEmbedEnglishHelpers.SpecialRewards = englishSpecialRewards;
 
             return (pk, embed.Build());
+        }
+
+        /// <summary>
+        /// PKHeX 26.x renamed the middle size from AV to M; raid embeds keep AV.
+        /// </summary>
+        private static string ScaleLabel(byte scale)
+        {
+            var rating = PokeSizeDetailedUtil.GetSizeRating(scale);
+            return rating == PokeSizeDetailed.M ? "AV" : rating.ToString();
         }
 
         public static byte[] StringToByteArray(string hex)

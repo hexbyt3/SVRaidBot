@@ -328,7 +328,7 @@ namespace SysBot.Pokemon.SV
         public static string GetSpecialRewards(IReadOnlyList<(int, int, int)> rewards, List<string> rewardsToShow, int languageId)
         {
             // Get localized item strings for the selected language
-            var strings = GameInfo.GetStrings(languageId);
+            var strings = GameInfo.GetStrings(((LanguageID)languageId).GetLanguageCode());
             Dictionary<string, int> rewardNameToId = new()
             {
                 ["Rare Candy"] = 50,

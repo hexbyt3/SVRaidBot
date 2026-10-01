@@ -41,6 +41,12 @@ namespace System.Collections.Concurrent
                 return _list.All(condition);
         }
 
+        public int CountWhere(Func<T, bool> condition)
+        {
+            lock (_syncLock)
+                return _list.Count(condition);
+        }
+
         /// <summary>
         /// Finds the first object which satisfies the <see cref="condition"/>, applies the <see cref="action"/>, and returns the <see cref="result"/>
         /// </summary>

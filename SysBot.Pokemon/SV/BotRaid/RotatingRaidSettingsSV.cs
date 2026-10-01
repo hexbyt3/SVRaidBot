@@ -119,6 +119,10 @@ namespace SysBot.Pokemon
             [Browsable(false)]
             [System.Text.Json.Serialization.JsonIgnore]
             public List<SocketUser> MentionedUsers { get; set; } = [];
+
+            [Browsable(false)]
+            [System.Text.Json.Serialization.JsonIgnore]
+            public SV.BotRaid.WebRaidRequest? WebRequest { get; set; }
         }
 
         public class TeraTypeBattlers
@@ -266,6 +270,17 @@ namespace SysBot.Pokemon
             [DisplayName("Join Shared Raids Program")]
             [Category(Hosting), Description("Enable to join the Shared Raids Program.")]
             public bool JoinSharedRaidsProgram { get; set; } = true;
+
+            [DisplayName("Host GenPKM Raid Requests?")]
+            [Category(Hosting), Description("When enabled, the bot also hosts raids GenPKM Premium members request at genpkm.com/raid-request, one at a time between your own raids. The member gets a private code; it is never posted to Discord. Only hosts approved for the Shared Raids Program can take requests.")]
+            public bool HostGenPKMRequests { get; set; } = true;
+
+            [DisplayName("GenPKM Host Name")]
+            [Category(Hosting), Description("The name GenPKM members see for your bot. Leave empty to use your in-game trainer name, which is also what they see in the lobby.")]
+            public string GenPKMHostName { get; set; } = string.Empty;
+
+            [Browsable(false)]
+            public string GenPKMBotId { get; set; } = string.Empty;
         }
 
         public class MoveTypeEmojiInfo

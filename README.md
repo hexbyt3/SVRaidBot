@@ -50,7 +50,7 @@ netsh advfirewall firewall add rule name="SVRaidBot Web" dir=in action=allow pro
 ## Raid Requests
 __Adding Requests__
  - Users can request their own raids using command `ra <seed> <difficulty> <storyprogress>`.
- - I have an online seed finder located here for your users to use: [https://genpkm.com/raids/seeds/](https://genpkm.com/raids/seeds/index.php)
+ - I have an online seed finder located here for your users to use: [https://genpkm.com/seeds](https://genpkm.com/seeds)
    
 __Removing Request__
 - Users can remove thier raid request by simply typing the `rqc` command.  This removes them from the queue.
@@ -63,6 +63,13 @@ __Disable Requests__
   
 __Limit Requests__
  - The bot owner can decide how many requests a user can submit in a certain time limit if they wish.
+
+__GenPKM Web Requests__
+ - GenPKM Premium members can request a raid at [genpkm.com/raid-request](https://genpkm.com/raid-request). Between its own raids, the bot picks up one waiting request that matches its game and map, hosts it, and sends the member their private code on the site.
+ - Only one bot ever takes a given request, and a member can only have one request open at a time.
+ - The code for a web request is never posted to Discord or the shared raids feed.
+ - Hosts approved for the Shared Raids Program get requests automatically. Turn it off with `Host GenPKM Raid Requests?` in Raid Settings, and set `GenPKM Host Name` to change the name members see (your in-game name by default).
+ - Web requests need one raid bot per program window.
    
 ## Full Event Support
 - Users can request an active event they want.  The bot will auto teleport your player to the nearest Event den and proceed with overwriting the seed.

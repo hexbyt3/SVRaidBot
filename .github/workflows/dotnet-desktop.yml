@@ -51,13 +51,15 @@ jobs:
       - name: Install .NET Core
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 9.0.x
       - name: Setup MSBuild.exe
         uses: microsoft/setup-msbuild@v2
       - name: Restore dependencies
         run: dotnet restore ${{ env.Project_Name }} --runtime win-x64
       - name: Build
         run: dotnet build ${{ env.Project_Name }} --configuration Release --no-restore
+      - name: Test
+        run: dotnet test SysBot.Tests/SysBot.Tests.csproj --configuration Release
       - name: Publish
         run: dotnet publish ${{ env.Project_Name }} --configuration Release --output ./publish /p:PublishSingleFile=true /p:SelfContained=false /p:RuntimeIdentifier=win-x64
       - name: Upload build artifacts
@@ -65,6 +67,7 @@ jobs:
         with:
           name: SVRaidBot
           path: ./publish
+          retention-days: 1
 
   create-release:
     needs: [version-check, build]
