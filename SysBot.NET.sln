@@ -1,3 +1,4 @@
+﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -13,6 +14,8 @@ EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SysBot.Pokemon.Discord", "SysBot.Pokemon.Discord\SysBot.Pokemon.Discord.csproj", "{C4BE4124-C1CF-4A81-AA7C-DE96A169CF1D}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SysBot.Pokemon.ConsoleApp", "SysBot.Pokemon.ConsoleApp\SysBot.Pokemon.ConsoleApp.csproj", "{C0525606-4ED4-4998-9AF3-31E2DE65717A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SysBot.Tests", "SysBot.Tests\SysBot.Tests.csproj", "{C0CCF028-A819-46A7-9AAB-53C54C610A99}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -117,6 +120,24 @@ Global
 		{C0525606-4ED4-4998-9AF3-31E2DE65717A}.sysbottest|x64.Build.0 = sysbottest|x64
 		{C0525606-4ED4-4998-9AF3-31E2DE65717A}.sysbottest|x86.ActiveCfg = sysbottest|x64
 		{C0525606-4ED4-4998-9AF3-31E2DE65717A}.sysbottest|x86.Build.0 = sysbottest|x64
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Debug|x64.Build.0 = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Debug|x86.Build.0 = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Release|x64.ActiveCfg = Release|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Release|x64.Build.0 = Release|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Release|x86.ActiveCfg = Release|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.Release|x86.Build.0 = Release|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.sysbottest|Any CPU.ActiveCfg = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.sysbottest|Any CPU.Build.0 = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.sysbottest|x64.ActiveCfg = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.sysbottest|x64.Build.0 = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.sysbottest|x86.ActiveCfg = Debug|Any CPU
+		{C0CCF028-A819-46A7-9AAB-53C54C610A99}.sysbottest|x86.Build.0 = Debug|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
