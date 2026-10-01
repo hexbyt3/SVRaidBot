@@ -1,4 +1,5 @@
 ﻿using PKHeX.Core;
+using System;
 using SysBot.Base;
 using System.Collections.Generic;
 using System.Threading;
@@ -50,8 +51,15 @@ namespace SysBot.Pokemon
         protected virtual void AddIntegrations()
         { }
 
+        public const string OneSwitchPerProgram =
+            "SVRaidBot runs one Switch per program. To host on another Switch, copy SVRaidBot into its own folder and run that copy.";
+
         public override void Add(RoutineExecutor<PokeBotState> bot)
         {
+            // Raid state (map, event data, the shared raid list) belongs to the
+            // program, not the bot, so two Switches in one program would mix them up.
+            if (Bots.Count > 0)
+                throw new ArgumentException(OneSwitchPerProgram);
             base.Add(bot);
             if (bot is PokeRoutineExecutorBase b && b.Config.InitialRoutine.IsRaidBot())
                 Hub.Bots.Add(b);

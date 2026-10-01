@@ -2,6 +2,7 @@
 using SysBot.Base;
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -59,11 +60,17 @@ namespace SysBot.Pokemon.ConsoleApp
         public static void RunBots(ProgramConfig prog)
         {
             IPokeBotRunner env = GetRunner(prog);
-            foreach (var bot in prog.Bots)
+            foreach (var bot in prog.Bots.Take(1))
             {
                 bot.Initialize();
                 if (!AddBot(env, bot, prog.Mode))
                     Console.WriteLine($"Failed to add bot: {bot}");
+            }
+            if (prog.Bots.Length > 1)
+            {
+                Console.WriteLine(PokeBotRunner<PK9>.OneSwitchPerProgram);
+                foreach (var bot in prog.Bots.Skip(1))
+                    Console.WriteLine($"Not hosting: {bot.Connection}");
             }
 
             LogUtil.Forwarders.Add((msg, ident) => Console.WriteLine($"{ident}: {msg}"));

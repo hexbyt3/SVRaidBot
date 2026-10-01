@@ -100,10 +100,18 @@ namespace SysBot.Pokemon.WinForms
                 LogConfig.LoggingEnabled = Config.Hub.LoggingEnabled;
 
                 RunningEnvironment = GetRunner(Config);
-                foreach (var bot in Config.Bots)
+                var first = Config.Bots.FirstOrDefault();
+                if (first != null)
                 {
-                    bot.Initialize();
-                    AddBot(bot);
+                    first.Initialize();
+                    AddBot(first);
+                }
+                if (Config.Bots.Length > 1)
+                {
+                    var dropped = string.Join(Environment.NewLine, Config.Bots.Skip(1).Select(b => b.Connection.ToString()));
+                    WinFormsUtil.Alert($"This copy of SVRaidBot now hosts only {first!.Connection}.",
+                        PokeBotRunner<PK9>.OneSwitchPerProgram + Environment.NewLine + Environment.NewLine +
+                        "These Switches were removed from this copy:" + Environment.NewLine + dropped);
                 }
             }
             else
@@ -418,6 +426,11 @@ namespace SysBot.Pokemon.WinForms
 
         private void B_New_Click(object sender, EventArgs e)
         {
+            if (Bots.Count > 0)
+            {
+                WinFormsUtil.Alert(PokeBotRunner<PK9>.OneSwitchPerProgram, "Remove the current bot first to switch this copy to a different Switch.");
+                return;
+            }
             var cfg = CreateNewBotConfig();
             if (!AddBot(cfg))
             {
