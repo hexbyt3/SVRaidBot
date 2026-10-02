@@ -1,9 +1,10 @@
 <Project>
   <PropertyGroup>
-    <TargetFramework>net7.0</TargetFramework>
+    <TargetFramework Condition="'$(TargetFramework)' == '' and '$(TargetFrameworks)' == ''">net7.0</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <LangVersion>11</LangVersion>
     <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);CS0108;CS0169;CS0219;CS0414;CS0649;CS8602;CS8603;CS8604;CS8618;CS8622;CS8629</NoWarn>
     <NeutralLanguage>en</NeutralLanguage>
     <SelfContained>false</SelfContained>
     <PackageAsSingleFile>true</PackageAsSingleFile>
