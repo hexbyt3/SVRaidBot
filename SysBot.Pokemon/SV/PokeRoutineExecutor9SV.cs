@@ -85,8 +85,15 @@ namespace SysBot.Pokemon.SV
         public async Task<RaidMyStatus> GetTradePartnerMyStatus(IReadOnlyList<long> pointer, CancellationToken token)
         {
             RaidMyStatus info = new();
-            byte[] read = await SwitchConnection.PointerPeek(info.Data.Length, pointer, token).ConfigureAwait(false);
-            read.CopyTo(info.Data, 0);
+            try
+            {
+                byte[] read = await SwitchConnection.PointerPeek(info.Data.Length, pointer, token).ConfigureAwait(false);
+                read.CopyTo(info.Data, 0);
+            }
+            catch (SwitchReadFailedException)
+            {
+                // The player left (or never loaded) and their status is gone; callers read an empty OT as "nobody here".
+            }
             return info;
         }
 

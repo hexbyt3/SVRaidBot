@@ -92,10 +92,25 @@ namespace SysBot.Base
             InitializeSocket();
         }
 
+        // One command and its reply at a time. The bot loop and the web panel share
+        // this socket; two requests in flight at once can each take the other's reply.
+        private readonly SemaphoreSlim _io = new(1, 1);
+
         /// <summary> Only call this if you are sending small commands. </summary>
         public async Task<int> SendAsync(byte[] buffer, CancellationToken token)
         {
-            return await RetryOperation(async (ct) => await Connection.SendAsync(buffer, ct).AsTask(), token);
+            return await RetryOperation(async (ct) =>
+            {
+                await _io.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    return await Connection.SendAsync(buffer, ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _io.Release();
+                }
+            }, token);
         }
 
         public async Task EnsureConnectedAsync(CancellationToken token)
@@ -117,19 +132,21 @@ namespace SysBot.Base
             return await RetryOperation(async (ct) =>
             {
                 await EnsureConnectedAsync(ct);
-                await SendAsync(cmd, ct).ConfigureAwait(false);
                 var size = (length * 2) + 1;
                 var buffer = ArrayPool<byte>.Shared.Rent(size);
+                await _io.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
+                    await Connection.SendAsync(cmd, ct).ConfigureAwait(false);
                     var mem = buffer.AsMemory()[..size];
                     var received = await ReceiveResponseAsync(mem, ct).ConfigureAwait(false);
                     if (received < size)
-                        throw new InvalidOperationException($"The console sent a short reply ({received} of {size} bytes); the address could not be read.");
+                        throw new SwitchReadFailedException($"The console could not read that memory ({received} of {size} bytes came back).");
                     return DecodeResult(mem, length);
                 }
                 finally
                 {
+                    _io.Release();
                     ArrayPool<byte>.Shared.Return(buffer, true);
                 }
             }, token);
@@ -255,9 +272,17 @@ namespace SysBot.Base
 
         public async Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token)
         {
-            await SendAsync(command, token).ConfigureAwait(false);
             var buffer = new byte[length];
-            await ReceiveResponseAsync(buffer, token).ConfigureAwait(false);
+            await _io.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                await Connection.SendAsync(command, token).ConfigureAwait(false);
+                await ReceiveResponseAsync(buffer, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _io.Release();
+            }
             return buffer;
         }
 
@@ -316,9 +341,17 @@ namespace SysBot.Base
 
         public async Task<byte[]> PixelPeek(CancellationToken token)
         {
-            await SendAsync(SwitchCommand.PixelPeek(), token).ConfigureAwait(false);
-
-            var data = await FlexRead(token).ConfigureAwait(false);
+            byte[] data;
+            await _io.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                await Connection.SendAsync(SwitchCommand.PixelPeek(), token).ConfigureAwait(false);
+                data = await FlexRead(token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _io.Release();
+            }
             var result = Array.Empty<byte>();
             try
             {

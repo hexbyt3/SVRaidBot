@@ -764,6 +764,10 @@ namespace SysBot.Pokemon.SV.BotRaid
                         {
                             try
                             {
+                                // A failed attempt usually restarted the game, which moves every pointer.
+                                if (prepareAttempts > 0)
+                                    await InitializeSessionOffsets(token).ConfigureAwait(false);
+
                                 prepareResult = await PrepareForRaid(token).ConfigureAwait(false);
 
                                 if (prepareResult == 0)
@@ -869,9 +873,9 @@ namespace SysBot.Pokemon.SV.BotRaid
                             }
                         }
                     }
-                    catch (ArgumentOutOfRangeException ex) when (ex.ParamName == "_0")
+                    catch (SwitchReadFailedException)
                     {
-                        Log("Connection error detected. Performing reboot and reset.");
+                        Log("The console could not read game memory. Performing reboot and reset.");
                         await PerformRebootAndReset(token).ConfigureAwait(false);
                     }
                     catch (Exception ex)
@@ -3027,6 +3031,10 @@ namespace SysBot.Pokemon.SV.BotRaid
                         data = await SwitchConnection.ReadBytesAbsoluteAsync(nidOfs, 8, token).ConfigureAwait(false);
                         nid = BitConverter.ToUInt64(data, 0);
                     }
+
+                    // Nobody took this slot before the lobby timed out, so it has no trainer to read.
+                    if (nid == 0)
+                        break;
 
                     List<long> ptr = [.. Offsets.Trader2MyStatusPointer];
                     ptr[2] += i * 0x30;
