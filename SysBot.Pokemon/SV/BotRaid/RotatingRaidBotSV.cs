@@ -2606,63 +2606,6 @@ namespace SysBot.Pokemon.SV.BotRaid
                 return 0;
             }
 
-            // Check if player is near any active den
-            var playerLocation = await GetPlayersLocation(token);
-            var currentRegion = await DetectCurrentRegion(token);
-            var activeRaids = await GetActiveRaidLocations(currentRegion, token);
-
-            if (activeRaids.Count > 0)
-            {
-                // Find nearest active den
-                var nearestRaid = activeRaids
-                    .OrderBy(raid => CalculateDistance(playerLocation,
-                        (raid.Coordinates[0], raid.Coordinates[1], raid.Coordinates[2])))
-                    .First();
-
-                float distance = CalculateDistance(playerLocation,
-                    (nearestRaid.Coordinates[0], nearestRaid.Coordinates[1], nearestRaid.Coordinates[2]));
-
-                if (distance > TeleportDistanceThreshold)
-                {
-                    if (_teleportRetryCount < MaxTeleportRetries)
-                    {
-                        _teleportRetryCount++;
-                        Log($"Player is too far from nearest den (distance: {distance:F2}, threshold: {TeleportDistanceThreshold}). Retry attempt {_teleportRetryCount}/{MaxTeleportRetries}. Restarting game to teleport.");
-                        await CloseGame(_hub.Config, token).ConfigureAwait(false);
-                        await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
-                        return 2;
-                    }
-                    else
-                    {
-                        // Max retries exceeded, continue anyway and reset counter
-                        Log($"Player is still far from nearest den after {MaxTeleportRetries} retries (distance: {distance:F2}). Continuing anyway...");
-                        _teleportRetryCount = 0;
-                    }
-                }
-                else
-                {
-                    // Player is close enough, reset retry counter
-                    _teleportRetryCount = 0;
-                    Log($"Player is near den (distance: {distance:F2}, threshold: {TeleportDistanceThreshold}).");
-                }
-            }
-            else
-            {
-                if (_teleportRetryCount < MaxTeleportRetries)
-                {
-                    _teleportRetryCount++;
-                    Log($"No active dens found. Retry attempt {_teleportRetryCount}/{MaxTeleportRetries}. Restarting game to find and teleport to a valid den.");
-                    await CloseGame(_hub.Config, token).ConfigureAwait(false);
-                    await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
-                    return 2;
-                }
-                else
-                {
-                    Log($"No active dens found after {MaxTeleportRetries} retries. Continuing anyway...");
-                    _teleportRetryCount = 0;
-                }
-            }
-
             if (!await ConnectToOnline(_hub.Config, token))
             {
                 // ConnectToOnline already handles retries and waiting periods
@@ -2694,12 +2637,12 @@ namespace SysBot.Pokemon.SV.BotRaid
                 return 2;
             }
 
-            var currentSeed = _settings.ActiveRaids[_currentRaidIndex].Seed.ToUpper();
-            bool seedsMatch = uint.TryParse(_denHexSeed, NumberStyles.AllowHexSpecifier, null, out var denSeed)
-                && uint.TryParse(currentSeed, NumberStyles.AllowHexSpecifier, null, out var wantedSeed)
-                && denSeed == wantedSeed;
+            // Connecting online re-syncs the raid table, so the dens read offline can
+            // be a different layout from the one the lobby opens on. Only now is it
+            // safe to ask where the seed is and whether the player stands at it.
+            var (raidDen, seedFound) = await FindWantedRaidDen(token).ConfigureAwait(false);
 
-            if (!seedsMatch)
+            if (!seedFound)
             {
                 _seedMismatchCount++;
                 Log($"Raid Den and Current Seed do not match. Mismatch count: {_seedMismatchCount}");
@@ -2712,6 +2655,11 @@ namespace SysBot.Pokemon.SV.BotRaid
                     return 2;
                 }
 
+                // Replace the den the player is standing at in the online layout.
+                await LogPlayerLocation(token).ConfigureAwait(false);
+                if (uint.TryParse(_denHexSeed, NumberStyles.AllowHexSpecifier, null, out var nearestSeed))
+                    await FindSeedIndexInRaids(nearestSeed, token).ConfigureAwait(false);
+
                 await Task.Delay(4_000, token).ConfigureAwait(false);
                 Log("Injecting correct seed.");
                 await CloseGame(_hub.Config, token).ConfigureAwait(false);
@@ -2719,10 +2667,30 @@ namespace SysBot.Pokemon.SV.BotRaid
                 Log("Seed injected Successfully!");
                 return 2;
             }
+
+            _seedMismatchCount = 0;
+            _seedIndexToReplace = raidDen.Index;
+            _denHexSeed = raidDen.Seed.ToString("X8");
+
+            var playerLocation = await GetPlayersLocation(token).ConfigureAwait(false);
+            float distance = CalculateDistance(playerLocation, (raidDen.Coordinates[0], raidDen.Coordinates[1], raidDen.Coordinates[2]));
+            if (distance > TeleportDistanceThreshold)
+            {
+                if (_teleportRetryCount < MaxTeleportRetries)
+                {
+                    _teleportRetryCount++;
+                    Log($"The raid is at den {raidDen.DenIdentifier}, {distance:F2} away (threshold: {TeleportDistanceThreshold}). Retry attempt {_teleportRetryCount}/{MaxTeleportRetries}. Restarting game to teleport.");
+                    await CloseGame(_hub.Config, token).ConfigureAwait(false);
+                    await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
+                    return 2;
+                }
+                Log($"Player is still {distance:F2} from den {raidDen.DenIdentifier} after {MaxTeleportRetries} retries. Continuing anyway...");
+            }
             else
             {
-                _seedMismatchCount = 0;
+                Log($"Raid is ready at den {raidDen.DenIdentifier} (distance: {distance:F2}).");
             }
+            _teleportRetryCount = 0;
 
             if (CurrentWebRequest is { } web)
             {
@@ -4815,6 +4783,24 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             // Update region flags based on the detected region
             IsKitakami = overallNearest.Region == "Kitakami";
             IsBlueberry = overallNearest.Region == "Blueberry";
+        }
+
+        /// <summary>
+        /// Finds the active den holding the seed of the raid being hosted.
+        /// </summary>
+        private async Task<((string DenIdentifier, float[] Coordinates, int Index, uint Seed, uint Flags, bool IsEvent) Den, bool Found)> FindWantedRaidDen(CancellationToken token)
+        {
+            if (!uint.TryParse(_settings.ActiveRaids[_currentRaidIndex].Seed, NumberStyles.AllowHexSpecifier, null, out var wantedSeed))
+                return (default, false);
+
+            var region = await DetectCurrentRegion(token).ConfigureAwait(false);
+            var activeRaids = await GetActiveRaidLocations(region, token).ConfigureAwait(false);
+            foreach (var raid in activeRaids)
+            {
+                if (raid.Seed == wantedSeed)
+                    return (raid, true);
+            }
+            return (default, false);
         }
 
         /// <summary>
