@@ -17,6 +17,27 @@ namespace SysBot.Tests
     public class WebRaidRulesTests
     {
         [Theory]
+        [InlineData("1")]
+        [InlineData("")]
+        [InlineData(null)]
+        [InlineData("not-a-guid-at-all-but-long-enough")]
+        public void BadStoredBotIdIsReplacedInsteadOfThrowing(string? stored)
+        {
+            var (id, install) = WebRaidRules.BotId(stored, "192.168.1.44:6000");
+            Guid.TryParseExact(install, "N", out _).Should().BeTrue();
+            id.Should().MatchRegex("^[0-9a-f]{16}-[0-9A-F]{12}$");
+        }
+
+        [Fact]
+        public void StoredBotIdIsKept()
+        {
+            var stored = Guid.NewGuid().ToString("N");
+            var (id, install) = WebRaidRules.BotId(stored, "192.168.1.44:6000");
+            install.Should().Be(stored);
+            id.Should().StartWith(stored[..16]);
+        }
+
+        [Theory]
         [InlineData("3739A70B", true)]
         [InlineData("0000abcd", true)]
         [InlineData("3739A70", false)]

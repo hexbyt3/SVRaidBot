@@ -2057,12 +2057,9 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// </summary>
         private string GetWebBotId()
         {
-            if (string.IsNullOrEmpty(_settings.RaidSettings.GenPKMBotId))
-                _settings.RaidSettings.GenPKMBotId = Guid.NewGuid().ToString("N");
-
-            // The console's address stays on this PC; only a short hash of it is sent.
-            var console = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Config.Connection.ToString())))[..12];
-            return $"{_settings.RaidSettings.GenPKMBotId[..16]}-{console}";
+            var (id, install) = WebRaidRules.BotId(_settings.RaidSettings.GenPKMBotId, Config.Connection.ToString());
+            _settings.RaidSettings.GenPKMBotId = install;
+            return id;
         }
 
         private static TeraRaidMapParent CurrentMap =>

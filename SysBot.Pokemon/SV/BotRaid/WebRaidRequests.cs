@@ -290,6 +290,20 @@ namespace SysBot.Pokemon.SV.BotRaid
             _ => false,
         };
 
+        /// <summary>
+        /// The id a bot claims under: the install's own id plus a short hash of the
+        /// console address, so one config copied to a second Switch never collides.
+        /// Also returns the install id to keep: a fresh one when the stored value is
+        /// not a GUID (a hand-edited "1" used to throw on every claim).
+        /// </summary>
+        public static (string BotId, string InstallId) BotId(string? storedInstallId, string consoleAddress)
+        {
+            var install = Guid.TryParseExact(storedInstallId, "N", out _) ? storedInstallId! : Guid.NewGuid().ToString("N");
+            // The console's address stays on this PC; only a short hash of it is sent.
+            var console = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(consoleAddress)))[..12];
+            return ($"{install[..16]}-{console}", install);
+        }
+
         public static TeraCrystalType CrystalFor(int stars, bool isEvent) => stars switch
         {
             7 => TeraCrystalType.Might,
