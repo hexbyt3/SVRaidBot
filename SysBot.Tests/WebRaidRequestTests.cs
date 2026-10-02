@@ -29,6 +29,17 @@ namespace SysBot.Tests
         }
 
         [Fact]
+        public void SettingsGridHidesTheBotId()
+        {
+            // The grid asks with Browsable(true); the converter used to drop that
+            // filter, so hosts saw (and edited) the bot id.
+            var converter = new RotatingRaidSettingsSV.CategoryConverter<RotatingRaidSettingsSV.RotatingRaidSettingsCategory>();
+            var shown = converter.GetProperties(null, new RotatingRaidSettingsSV.RotatingRaidSettingsCategory(), [System.ComponentModel.BrowsableAttribute.Yes])!;
+            shown.Find(nameof(RotatingRaidSettingsSV.RotatingRaidSettingsCategory.GenPKMBotId), false).Should().BeNull();
+            shown.Find(nameof(RotatingRaidSettingsSV.RotatingRaidSettingsCategory.HostGenPKMRequests), false).Should().NotBeNull();
+        }
+
+        [Fact]
         public void StoredBotIdIsKept()
         {
             var stored = Guid.NewGuid().ToString("N");
