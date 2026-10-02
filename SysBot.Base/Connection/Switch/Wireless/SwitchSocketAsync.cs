@@ -123,7 +123,9 @@ namespace SysBot.Base
                 try
                 {
                     var mem = buffer.AsMemory()[..size];
-                    await Connection.ReceiveAsync(mem, ct);
+                    var received = await ReceiveResponseAsync(mem, ct).ConfigureAwait(false);
+                    if (received < size)
+                        throw new InvalidOperationException($"The console sent a short reply ({received} of {size} bytes); the address could not be read.");
                     return DecodeResult(mem, length);
                 }
                 finally
@@ -255,8 +257,32 @@ namespace SysBot.Base
         {
             await SendAsync(command, token).ConfigureAwait(false);
             var buffer = new byte[length];
-            await Connection.ReceiveAsync(buffer, token);
+            await ReceiveResponseAsync(buffer, token).ConfigureAwait(false);
             return buffer;
+        }
+
+        /// <summary>
+        /// ReceiveAsync returns as soon as any bytes arrive, not when the buffer is
+        /// full. A reply split across TCP packets used to decode its unfilled tail
+        /// as zeros ("Parameter '_0'"), and the rest of it was then read as the start
+        /// of the next reply, so every read after it failed too. Replies are hex text
+        /// ending in '\n', which the payload never contains, so a chunk ending in it
+        /// is the whole reply; that also ends the short replies sys-botbase sends
+        /// for an unreadable address instead of waiting on them forever.
+        /// </summary>
+        private async ValueTask<int> ReceiveResponseAsync(Memory<byte> buffer, CancellationToken token)
+        {
+            int read = 0;
+            while (read < buffer.Length)
+            {
+                int count = await Connection.ReceiveAsync(buffer[read..], token).ConfigureAwait(false);
+                if (count == 0)
+                    throw new SocketException((int)SocketError.ConnectionReset);
+                read += count;
+                if (buffer.Span[read - 1] == (byte)'\n')
+                    break;
+            }
+            return read;
         }
 
         public async Task SendRaw(byte[] command, CancellationToken token)

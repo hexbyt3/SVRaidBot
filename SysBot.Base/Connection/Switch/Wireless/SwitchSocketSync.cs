@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Net.Sockets;
 using System.Threading;
 using static SysBot.Base.SwitchOffsetType;
 
@@ -36,7 +37,21 @@ namespace SysBot.Base
             Log("Disconnected!");
         }
 
-        private int Read(byte[] buffer) => Connection.Receive(buffer);
+        // Receive returns whatever has arrived; keep going until the '\n' that ends every reply.
+        private int Read(byte[] buffer)
+        {
+            int read = 0;
+            while (read < buffer.Length)
+            {
+                int count = Connection.Receive(buffer, read, buffer.Length - read, SocketFlags.None);
+                if (count == 0)
+                    throw new SocketException((int)SocketError.ConnectionReset);
+                read += count;
+                if (buffer[read - 1] == (byte)'\n')
+                    break;
+            }
+            return read;
+        }
 
         public int Send(byte[] buffer) => Connection.Send(buffer);
 
