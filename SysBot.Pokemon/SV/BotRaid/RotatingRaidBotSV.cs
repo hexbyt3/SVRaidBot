@@ -3473,11 +3473,6 @@ namespace SysBot.Pokemon.SV.BotRaid
                 code = string.Empty;
             }
 
-            // A GenPKM request's code belongs to the member who asked for it:
-            // no code, no code reaction and no lobby screenshot (the Switch shows
-            // the code on screen) may reach Discord or the shared raid feed.
-            bool privateCode = _settings.ActiveRaids[_currentRaidIndex].WebRequest != null;
-
             // Apply delay only if the raid was added by RA command, not a Mystery Shiny Raid, and has a code
             if (_settings.ActiveRaids[_currentRaidIndex].AddedByRACommand &&
                 _settings.ActiveRaids[_currentRaidIndex].Title != MysteryRaidTitle &&
@@ -3510,7 +3505,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             bool shouldTakeScreenshot = _settings.EmbedToggles.TakeScreenshot && !upnext &&
                 (!isRaidStartingWithCountdown || (!_settings.EmbedToggles.HideRaidCode && code != "Free For All"));
 
-            if (!privateCode && !disband && names is not null && !upnext && _settings.EmbedToggles.TakeScreenshot)
+            if (!disband && names is not null && !upnext && _settings.EmbedToggles.TakeScreenshot)
             {
                 try
                 {
@@ -3528,7 +3523,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                     Log($"Error while capturing screenshots: {ex.Message}");
                 }
             }
-            else if (shouldTakeScreenshot && !privateCode)
+            else if (shouldTakeScreenshot)
             {
                 try
                 {
@@ -3554,7 +3549,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             var turl = string.Empty;
             Log($"Rotation Count: {_currentRaidIndex} | Species is {_settings.ActiveRaids[_currentRaidIndex].Species}");
             if (!disband && !upnext && !raidstart)
-                Log(privateCode ? "Raid Code sent privately to the GenPKM member." : $"Raid Code is: {code}");
+                Log($"Raid Code is: {code}");
             PK9 pk = new()
             {
                 Species = (ushort)_settings.ActiveRaids[_currentRaidIndex].Species,
@@ -3632,9 +3627,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Set title based on condition
             if (disband)
             {
-                embed.Title = privateCode
-                    ? $"**{EmbedLanguageManager.GetLocalizedText("Raid canceled", language)}**"
-                    : $"**{EmbedLanguageManager.GetLocalizedText("Raid canceled", language)}: [{_teraRaidCode}]**";
+                embed.Title = $"**{EmbedLanguageManager.GetLocalizedText("Raid canceled", language)}: [{_teraRaidCode}]**";
             }
             else if (upnext && _settings.RaidSettings.TotalRaidsToHost != 0)
             {
@@ -3778,15 +3771,7 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             if (!disband && names is null && !upnext)
             {
-                if (privateCode)
-                {
-                    string fieldName = _settings.EmbedToggles.IncludeCountdown
-                        ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
-                        : $"**{EmbedLanguageManager.GetLocalizedText("Waiting in lobby", language)}!**";
-
-                    embed.AddField(fieldName, "🔒 Private raid requested on genpkm.com", true);
-                }
-                else if (code == "Free For All")
+                if (code == "Free For All")
                 {
                     string fieldName = _settings.EmbedToggles.IncludeCountdown
                         ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
@@ -3853,7 +3838,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             }
 
             // Only add reaction instructions if HideRaidCode is true
-            if (!privateCode && !disband && names is null && !upnext && !raidstart && code != "Free For All" && _settings.EmbedToggles.HideRaidCode)
+            if (!disband && names is null && !upnext && !raidstart && code != "Free For All" && _settings.EmbedToggles.HideRaidCode)
             {
                 // Add a field with code information for reaction system
                 string fieldName = $"**__{EmbedLanguageManager.GetLocalizedText("Raid Code", language)}__**";
@@ -3875,7 +3860,6 @@ namespace SysBot.Pokemon.SV.BotRaid
                 !upnext &&
                 !raidstart &&
                 !disband &&
-                !privateCode &&
                 _settings.EmbedToggles.HideRaidCode; // Only use reactions if hiding code
 
             if (isInitialCodedRaidAnnouncement)
@@ -4181,7 +4165,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         /// </summary>
         private async Task CurrentRaidInfo(List<string>? names, string code, bool hatTrick, bool disband, bool upnext, bool raidstart, string? imageUrl, bool lobbyFull, CancellationToken token)
         {
-            if (!_settings.RaidSettings.JoinSharedRaidsProgram || CurrentWebRequest != null)
+            if (!_settings.RaidSettings.JoinSharedRaidsProgram)
                 return;
 
             string? encryptedCode = null;
