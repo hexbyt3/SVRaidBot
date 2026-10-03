@@ -4,6 +4,7 @@ using SysBot.Base;
 using SysBot.Pokemon.SV.BotRaid;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -19,8 +20,6 @@ namespace SysBot.Pokemon.SV
     {
         protected PokeDataOffsetsSV Offsets { get; } = new();
         public ulong returnOfs = 0;
-
-        private ulong KeyBlockAddress = 0;
 
         public ulong BaseBlockKeyPointer;
 
@@ -138,6 +137,7 @@ namespace SysBot.Pokemon.SV
             await Click(HOME, 2_000 + timing.ExtraTimeReturnHome, token).ConfigureAwait(false);
             await Click(X, 1_000, token).ConfigureAwait(false);
             await Click(A, 5_000 + timing.RestartGameSettings.ExtraTimeCloseGame, token).ConfigureAwait(false);
+            ClearBlockCache();
             Log("Closed out of the game!");
         }
 
@@ -187,25 +187,32 @@ namespace SysBot.Pokemon.SV
                 await Click(A, 1_000, token).ConfigureAwait(false);
             }
 
-            int timer = 60_000;
+            // Time-based, because each overworld check can itself take seconds on a bad link.
+            var waited = Stopwatch.StartNew();
+            var rescueAfter = TimeSpan.FromMinutes(1);
+            var giveUpAfter = TimeSpan.FromMinutes(5);
+            bool rescuing = false;
             while (!await IsOnOverworldTitle(token).ConfigureAwait(false))
             {
-                await Task.Delay(1_000, token).ConfigureAwait(false);
-                timer -= 1_000;
+                if (waited.Elapsed > giveUpAfter)
+                    throw new TimeoutException($"The game did not reach the overworld within {giveUpAfter.TotalMinutes:0} minutes of restarting.");
+
                 // We haven't made it back to overworld after a minute, so press A every 6 seconds hoping to restart the game.
                 // Don't risk it if hub is set to avoid updates.
-                if (timer <= 0 && !timing.RestartGameSettings.AvoidSystemUpdate)
+                if (waited.Elapsed > rescueAfter && !timing.RestartGameSettings.AvoidSystemUpdate)
                 {
-                    Log("Still not in the game, initiating rescue protocol!");
-                    while (!await IsOnOverworldTitle(token).ConfigureAwait(false))
-                    {
-                        await Click(A, 6_000, token).ConfigureAwait(false);
-                    }
-
-                    break;
+                    if (!rescuing)
+                        Log("Still not in the game, initiating rescue protocol!");
+                    rescuing = true;
+                    await Click(A, 6_000, token).ConfigureAwait(false);
+                }
+                else
+                {
+                    await Task.Delay(1_000, token).ConfigureAwait(false);
                 }
             }
 
+            ClearBlockCache();
             await Task.Delay(5_000 + timing.ExtraTimeLoadOverworld, token).ConfigureAwait(false);
             Log("Back in the overworld!");
         }
@@ -449,11 +456,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<bool> WriteEncryptedBlockInt32(DataBlock block, int valueToExpect, int valueToInject, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
@@ -476,76 +478,110 @@ namespace SysBot.Pokemon.SV
 
         private async Task<byte[]> ReadDecryptedBlock(DataBlock block, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             byte[] data = await SwitchConnection.PointerPeek(block.Size, block.Pointer!, token).ConfigureAwait(false);
             return data;
         }
 
         private async Task<ulong> GetBlockAddress(DataBlock block, CancellationToken token, bool prepareAddress = true)
         {
-            KeyBlockAddress = 0;
-
             if (block.Pointer == null)
             {
                 Log("Block pointer is null. Aborting operation.");
                 throw new ArgumentNullException(nameof(block.Pointer), "Block pointer cannot be null.");
             }
 
-            if (KeyBlockAddress == 0)
+            if (!TryGetCachedKeyEntry(block.Key, out var entry) || !await CachedKeyEntryHolds(entry, block.Key, token).ConfigureAwait(false))
             {
-                KeyBlockAddress = await SwitchConnection.PointerAll(block.Pointer, token).ConfigureAwait(false);
+                ulong table = await SwitchConnection.PointerAll(block.Pointer, token).ConfigureAwait(false);
+                entry = await FindKeyEntry(table, block.Key, token).ConfigureAwait(false);
             }
 
-            byte[] keyblock = await SwitchConnection.ReadBytesAbsoluteAsync(KeyBlockAddress, 16, token).ConfigureAwait(false);
-            if (keyblock == null || keyblock.Length < 16)
+            return prepareAddress ? await PrepareAddress(entry, token).ConfigureAwait(false) : entry;
+        }
+
+        // Each save block has a 48-byte entry in a table sorted by key: the key at +0
+        // and the block's data pointer at +8. Finding one is a binary search of about
+        // 16 reads, and the bot looks up two dozen blocks per raid, so the entry
+        // addresses are kept until the game restarts. A cached entry is re-checked
+        // against its key before use, so a stale one is searched again, never trusted.
+        private readonly Dictionary<uint, ulong> _keyEntries = [];
+        private const ulong KeyEntrySize = 48;
+
+        public void ClearBlockCache()
+        {
+            lock (_keyEntries)
+                _keyEntries.Clear();
+        }
+
+        private bool TryGetCachedKeyEntry(uint key, out ulong entry)
+        {
+            lock (_keyEntries)
+                return _keyEntries.TryGetValue(key, out entry);
+        }
+
+        private void ForgetKeyEntry(uint key)
+        {
+            lock (_keyEntries)
+                _keyEntries.Remove(key);
+        }
+
+        private async Task<bool> CachedKeyEntryHolds(ulong entry, uint key, CancellationToken token)
+        {
+            try
             {
-                Log("Failed to read keyblock or keyblock is too short.");
-                throw new InvalidOperationException("Failed to read keyblock.");
+                byte[] found = await SwitchConnection.ReadBytesAbsoluteAsync(entry, 4, token).ConfigureAwait(false);
+                if (BitConverter.ToUInt32(found) == key)
+                    return true;
             }
-
-            ulong start = BitConverter.ToUInt64(keyblock.AsSpan()[..8]);
-            ulong end = BitConverter.ToUInt64(keyblock.AsSpan()[8..]);
-            ulong ct = 48;
-
-            while (start < end)
+            catch
             {
-                ulong block_ct = (end - start) / ct;
-                ulong mid = start + (block_ct >> 1) * ct;
+                ForgetKeyEntry(key);
+                throw;
+            }
+            ForgetKeyEntry(key);
+            return false;
+        }
+
+        /// <summary>
+        /// Binary-searches the key table whose start and end addresses sit at <paramref name="tableRange"/>.
+        /// </summary>
+        private async Task<ulong> FindKeyEntry(ulong tableRange, uint key, CancellationToken token)
+        {
+            byte[] range = await SwitchConnection.ReadBytesAbsoluteAsync(tableRange, 16, token).ConfigureAwait(false);
+            ulong start = BitConverter.ToUInt64(range.AsSpan()[..8]);
+            ulong end = BitConverter.ToUInt64(range.AsSpan()[8..]);
+
+            // A sorted table of any real size is searched in well under 64 steps;
+            // more means the range itself was garbage.
+            for (int step = 0; start < end && step < 64; step++)
+            {
+                ulong count = (end - start) / KeyEntrySize;
+                ulong mid = start + (count >> 1) * KeyEntrySize;
 
                 byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(mid, 4, token).ConfigureAwait(false);
-                if (data == null || data.Length < 4)
-                {
-                    Log("Failed to read data or data is too short.");
-                    continue; // or break, depending on your error handling strategy
-                }
-
                 uint found = BitConverter.ToUInt32(data);
-                if (found == block.Key)
+                if (found == key)
                 {
-                    if (prepareAddress)
-                    {
-                        mid = await PrepareAddress(mid, token).ConfigureAwait(false);
-                    }
-
+                    lock (_keyEntries)
+                        _keyEntries[key] = mid;
                     return mid;
                 }
 
-                if (found >= block.Key)
-                {
+                if (found > key)
                     end = mid;
-                }
                 else
-                {
-                    start = mid + ct;
-                }
+                    start = mid + KeyEntrySize;
             }
 
             Log("Block key not found within the specified range.");
-            throw new ArgumentOutOfRangeException(nameof(block), "Block key not found.");
+            throw new ArgumentOutOfRangeException(nameof(key), $"Block key {key:X8} not found.");
+        }
+
+        private async Task<ulong> FindKeyEntryCached(ulong tableRange, uint key, CancellationToken token)
+        {
+            if (TryGetCachedKeyEntry(key, out var entry) && await CachedKeyEntryHolds(entry, key, token).ConfigureAwait(false))
+                return entry;
+            return await FindKeyEntry(tableRange, key, token).ConfigureAwait(false);
         }
 
         private async Task<ulong> PrepareAddress(ulong address, CancellationToken token)
@@ -555,11 +591,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<bool> WriteEncryptedBlockUint(DataBlock block, uint valueToExpect, uint valueToInject, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
@@ -582,11 +613,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<byte[]> ReadEncryptedBlockHeader(DataBlock block, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             ulong address = await GetBlockAddress(block, token).ConfigureAwait(false);
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(block.Key, header);
@@ -603,11 +629,6 @@ namespace SysBot.Pokemon.SV
         {
             Log("Starting WriteEncryptedBlockSByte method.");
 
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                Log("No remote connection. Aborting write operation.");
-                throw new InvalidOperationException("No remote connection");
-            }
 
             ulong address;
             try
@@ -646,11 +667,6 @@ namespace SysBot.Pokemon.SV
 
         public async Task<bool> WriteEncryptedBlockByte(DataBlock block, byte valueToExpect, byte valueToInject, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
@@ -673,11 +689,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<bool> WriteDecryptedBlock(byte[] data, DataBlock block, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             ulong pointer = await SwitchConnection.PointerAll(block.Pointer!, token).ConfigureAwait(false);
             await SwitchConnection.WriteBytesAbsoluteAsync(data, pointer, token).ConfigureAwait(false);
 
@@ -686,11 +697,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<bool> WriteEncryptedBlockBool(DataBlock block, bool valueToExpect, bool valueToInject, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
@@ -713,11 +719,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<bool> WriteEncryptedBlockArray(DataBlock block, byte[] arrayToExpect, byte[] arrayToInject, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
@@ -740,11 +741,6 @@ namespace SysBot.Pokemon.SV
 
         public async Task<bool> WriteEncryptedBlockObject(DataBlock block, byte[] valueToExpect, byte[] valueToInject, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
@@ -779,11 +775,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<byte[]?> ReadEncryptedBlockArray(DataBlock block, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             ulong address = await GetBlockAddress(block, token).ConfigureAwait(false);
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, 6 + block.Size, token).ConfigureAwait(false);
             data = BlockUtil.DecryptBlock(block.Key, data);
@@ -792,11 +783,6 @@ namespace SysBot.Pokemon.SV
 
         public async Task<bool> ReadEncryptedBlockBool(DataBlock block, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             ulong address = await GetBlockAddress(block, token).ConfigureAwait(false);
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, block.Size, token).ConfigureAwait(false);
             byte[] res = BlockUtil.DecryptBlock(block.Key, data);
@@ -805,8 +791,11 @@ namespace SysBot.Pokemon.SV
 
         public async Task<sbyte> ReadEncryptedBlockByte(DataBlock block, CancellationToken token)
         {
-            BaseBlockKeyPointer = await SwitchConnection.PointerAll(Offsets.BlockKeyPointer, token).ConfigureAwait(false);
-            ulong addr = await SearchSaveKey(BaseBlockKeyPointer, block.Key, token).ConfigureAwait(false);
+            if (!TryGetCachedKeyEntry(block.Key, out var addr) || !await CachedKeyEntryHolds(addr, block.Key, token).ConfigureAwait(false))
+            {
+                BaseBlockKeyPointer = await SwitchConnection.PointerAll(Offsets.BlockKeyPointer, token).ConfigureAwait(false);
+                addr = await FindKeyEntry(BaseBlockKeyPointer + 8, block.Key, token).ConfigureAwait(false);
+            }
             addr = BitConverter.ToUInt64(await SwitchConnection.ReadBytesAbsoluteAsync(addr + 8, 0x8, token).ConfigureAwait(false), 0);
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(addr, 5, token).ConfigureAwait(false);
             header = DecryptBlock(block.Key, header);
@@ -821,11 +810,6 @@ namespace SysBot.Pokemon.SV
 
         private async Task<byte[]?> ReadEncryptedBlockObject(DataBlock block, CancellationToken token)
         {
-            if (Config.Connection.Protocol is SwitchProtocol.WiFi && !Connection.Connected)
-            {
-                throw new InvalidOperationException("No remote connection");
-            }
-
             ulong address = await GetBlockAddress(block, token).ConfigureAwait(false);
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(block.Key, header);
@@ -835,35 +819,8 @@ namespace SysBot.Pokemon.SV
             return res;
         }
 
-        public async Task<ulong> SearchSaveKey(ulong baseBlock, uint key, CancellationToken token)
-        {
-            byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(baseBlock + 8, 16, token).ConfigureAwait(false);
-            ulong start = BitConverter.ToUInt64(data.AsSpan()[..8]);
-            ulong end = BitConverter.ToUInt64(data.AsSpan()[8..]);
-
-            while (start < end)
-            {
-                ulong block_ct = (end - start) / 48;
-                ulong mid = start + (block_ct >> 1) * 48;
-
-                data = await SwitchConnection.ReadBytesAbsoluteAsync(mid, 4, token).ConfigureAwait(false);
-                uint found = BitConverter.ToUInt32(data);
-                if (found == key)
-                {
-                    return mid;
-                }
-
-                if (found >= key)
-                {
-                    end = mid;
-                }
-                else
-                {
-                    start = mid + 48;
-                }
-            }
-            return start;
-        }
+        public Task<ulong> SearchSaveKey(ulong baseBlock, uint key, CancellationToken token)
+            => FindKeyEntryCached(baseBlock + 8, key, token);
 
         private static byte[] DecryptBlock(uint key, byte[] block)
         {
@@ -876,35 +833,8 @@ namespace SysBot.Pokemon.SV
             return block;
         }
 
-        public async Task<ulong> SearchSaveKeyRaid(ulong BaseBlockKeyPointer, uint key, CancellationToken token)
-        {
-            byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(BaseBlockKeyPointer + 8, 16, token).ConfigureAwait(false);
-            ulong start = BitConverter.ToUInt64(data.AsSpan()[..8]);
-            ulong end = BitConverter.ToUInt64(data.AsSpan()[8..]);
-
-            while (start < end)
-            {
-                ulong block_ct = (end - start) / 48;
-                ulong mid = start + (block_ct >> 1) * 48;
-
-                data = await SwitchConnection.ReadBytesAbsoluteAsync(mid, 4, token).ConfigureAwait(false);
-                uint found = BitConverter.ToUInt32(data);
-                if (found == key)
-                {
-                    return mid;
-                }
-
-                if (found >= key)
-                {
-                    end = mid;
-                }
-                else
-                {
-                    start = mid + 48;
-                }
-            }
-            return start;
-        }
+        public Task<ulong> SearchSaveKeyRaid(ulong BaseBlockKeyPointer, uint key, CancellationToken token)
+            => FindKeyEntryCached(BaseBlockKeyPointer + 8, key, token);
 
         public async Task<byte[]> ReadSaveBlockRaid(ulong BaseBlockKeyPointer, uint key, int size, CancellationToken token)
         {

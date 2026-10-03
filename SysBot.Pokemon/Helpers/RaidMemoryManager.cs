@@ -110,34 +110,46 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
     {
         try
         {
-            // Get the appropriate pointer
-            List<long> ptr = DeterminePointer(index);
+            var (map, _) = FromGlobalIndex(index);
+            var entryPtr = DeterminePointer(index);
+            entryPtr[^1] -= SeedOffsetInRaid;
 
-            // Inject the seed
-            byte[] seedBytes = BitConverter.GetBytes(seed);
-            await _connection.PointerPoke(seedBytes, ptr, token).ConfigureAwait(false);
-
-            // Verify seed was written correctly
-            byte[] verification = await _connection.PointerPeek(4, ptr, token).ConfigureAwait(false);
-            uint verifiedSeed = BitConverter.ToUInt32(verification, 0);
-
-            if (seed != verifiedSeed)
-            {
+            // Check the slot is really a den before touching it: a wrong pointer
+            // chain would otherwise land the write on some other object.
+            byte[] entry = await _connection.PointerPeek((int)Raid.SIZE, entryPtr, token).ConfigureAwait(false);
+            if (!LooksLikeRaidEntry(entry, map))
                 return false;
-            }
 
-            // Inject crystal type
-            var crystalPtr = new List<long>(ptr);
-            crystalPtr[3] = ptr[3] + 0x08;
-            byte[] crystalBytes = BitConverter.GetBytes((int)crystalType);
-            await _connection.PointerPoke(crystalBytes, crystalPtr, token).ConfigureAwait(false);
+            // Seed (0x10), the untouched word at 0x14, then the crystal type (0x18), in one write.
+            byte[] patch = entry[SeedOffsetInRaid..(SeedOffsetInRaid + 12)];
+            BitConverter.TryWriteBytes(patch.AsSpan(0, 4), seed);
+            BitConverter.TryWriteBytes(patch.AsSpan(8, 4), (int)crystalType);
+            var seedPtr = DeterminePointer(index);
+            await _connection.PointerPoke(patch, seedPtr, token).ConfigureAwait(false);
 
-            return true;
+            byte[] verification = await _connection.PointerPeek(patch.Length, seedPtr, token).ConfigureAwait(false);
+            return verification.AsSpan().SequenceEqual(patch);
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return false;
         }
+    }
+
+    private static bool LooksLikeRaidEntry(ReadOnlySpan<byte> entry, TeraRaidMapParent map)
+    {
+        if (entry.Length < Raid.SIZE || !entry.ContainsAnyExcept((byte)0))
+            return false;
+        uint enabled = BitConverter.ToUInt32(entry[0x00..]);
+        uint area = BitConverter.ToUInt32(entry[0x04..]);
+        uint crystal = BitConverter.ToUInt32(entry[0x18..]);
+        uint maxArea = map switch
+        {
+            TeraRaidMapParent.Kitakami => 11,
+            TeraRaidMapParent.Blueberry => 8,
+            _ => 22,
+        };
+        return enabled <= 1 && area <= maxArea && crystal <= (uint)TeraCrystalType.Might;
     }
 
     /// <summary>
@@ -167,21 +179,25 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
     /// </summary>
     /// <param name="index">The global raid index</param>
     /// <param name="token">Cancellation token</param>
-    /// <returns>True if the raid is marked as active in memory</returns>
-    public async Task<bool> ReadIsActiveFlag(int index, CancellationToken token)
+    /// <returns>Whether the raid is marked active, or null when the flag could not be read</returns>
+    public async Task<bool?> ReadIsActiveFlag(int index, CancellationToken token)
     {
         try
         {
             var ptr = DeterminePointer(index);
             // IsActive is at offset 0x00, Seed is at offset 0x10, so IsActive = Seed - 0x10
             ptr[3] -= 0x10;
-            // IsActive is a uint32 (4 bytes), value of 1 = active
             byte[] data = await _connection.PointerPeek(4, ptr, token).ConfigureAwait(false);
-            return BitConverter.ToUInt32(data, 0) == 1;
+            return BitConverter.ToUInt32(data, 0) switch
+            {
+                0 => false,
+                1 => true,
+                _ => null,
+            };
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return false;
+            return null;
         }
     }
 

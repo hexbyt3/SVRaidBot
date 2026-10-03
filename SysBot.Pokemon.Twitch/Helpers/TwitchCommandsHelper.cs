@@ -167,6 +167,8 @@ namespace SysBot.Pokemon.Twitch
         {
             var list = SysCord<T>.Runner.Hub.Config.RotatingRaidSV.ActiveRaids;
             var rotationCount = RotatingRaidBotSV.RotationCount;
+            if (list.Count == 0)
+                return "There are no raids in the rotation right now.";
 
             int startIndex = rotationCount % list.Count;
             int endIndex = startIndex + 4;
