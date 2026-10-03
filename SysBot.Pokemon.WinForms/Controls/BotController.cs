@@ -370,8 +370,7 @@ namespace SysBot.Pokemon.WinForms
                         if (prompt != DialogResult.Yes)
                             return;
 
-                        bot.Bot.Connection.Reset();
-                        bot.Start();
+                        bot.Restart();
                         break;
                     }
                 default:

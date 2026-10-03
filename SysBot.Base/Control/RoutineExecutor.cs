@@ -39,18 +39,30 @@ namespace SysBot.Base
         public async Task RunAsync(CancellationToken token)
         {
             Connection.Connect();
-            Log("Initializing connection with console...");
-            await InitialStartup(token).ConfigureAwait(false);
-            await MainLoop(token).ConfigureAwait(false);
-            Connection.Disconnect();
+            try
+            {
+                Log("Initializing connection with console...");
+                await InitialStartup(token).ConfigureAwait(false);
+                await MainLoop(token).ConfigureAwait(false);
+            }
+            finally
+            {
+                Connection.Disconnect();
+            }
         }
 
         public async Task RebootAndStopAsync(CancellationToken token)
         {
             Connection.Connect();
-            await InitialStartup(token).ConfigureAwait(false);
-            await RebootAndStop(token).ConfigureAwait(false);
-            Connection.Disconnect();
+            try
+            {
+                await InitialStartup(token).ConfigureAwait(false);
+                await RebootAndStop(token).ConfigureAwait(false);
+            }
+            finally
+            {
+                Connection.Disconnect();
+            }
         }
 
         public async Task RefreshMapAsync(CancellationToken token)
