@@ -490,12 +490,58 @@ public static class WebApiExtensions
         {
             var exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
             var exeDir = Path.GetDirectoryName(exePath) ?? Program.WorkingDirectory;
+            DeleteStalePortFiles(exeDir);
             var portFile = Path.Combine(exeDir, $"SVRaidBot_{Environment.ProcessId}.port");
             File.WriteAllText(portFile, _tcpPort.ToString());
+            AppDomain.CurrentDomain.ProcessExit -= OnProcessExit;
+            AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
         }
         catch (Exception ex)
         {
             LogUtil.LogError($"Failed to create port file: {ex.Message}", "WebServer");
+        }
+    }
+
+    private static void OnProcessExit(object? sender, EventArgs e) => CleanupPortFile();
+
+    // A copy that crashed or was ended from Task Manager never removes its own file,
+    // so every start clears the files of copies that are no longer running.
+    private static void DeleteStalePortFiles(string exeDir)
+    {
+        var self = System.Diagnostics.Process.GetCurrentProcess();
+        foreach (var file in Directory.EnumerateFiles(exeDir, "SVRaidBot_*.port"))
+        {
+            try
+            {
+                var idText = Path.GetFileNameWithoutExtension(file)["SVRaidBot_".Length..];
+                if (!int.TryParse(idText, out int pid) || pid == self.Id || IsLiveCopy(pid, self.ProcessName, File.GetLastWriteTime(file)))
+                    continue;
+                File.Delete(file);
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"Could not remove old port file {Path.GetFileName(file)}: {ex.Message}", "WebServer");
+            }
+        }
+    }
+
+    // Windows reuses process ids, so the id must belong to this program and to a
+    // process that was already running when the file was written.
+    private static bool IsLiveCopy(int pid, string processName, DateTime written)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            return process.ProcessName.Equals(processName, StringComparison.OrdinalIgnoreCase)
+                && process.StartTime <= written.AddMinutes(1);
+        }
+        catch (ArgumentException)
+        {
+            return false; // no process with that id
+        }
+        catch
+        {
+            return true; // can't tell; leave it alone
         }
     }
 

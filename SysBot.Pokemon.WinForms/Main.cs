@@ -232,7 +232,9 @@ namespace SysBot.Pokemon.WinForms
         {
             // If not exiting, minimize to tray instead. An update closes the program
             // for real, so it still stops the bots and saves like any other exit.
-            if (!isExiting && !IsUpdating)
+            // Only the user's own close button minimizes to the tray. Cancelling a Windows
+            // shutdown or a Task Manager close used to skip all the cleanup below.
+            if (!isExiting && !IsUpdating && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
                 WindowState = FormWindowState.Minimized;
