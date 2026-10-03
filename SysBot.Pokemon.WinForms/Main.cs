@@ -73,32 +73,26 @@ namespace SysBot.Pokemon.WinForms
 
             if (File.Exists(Program.ConfigPath))
             {
+                // A file another program holds open is not a corrupt one: replacing it
+                // with the backup or with defaults would throw away a good config.
+                var lines = ReadConfigText();
+                if (lines == null)
+                {
+                    WinFormsUtil.Error("config.json is open in another program and could not be read.",
+                        "Close whatever has it open (an editor, antivirus scan or sync tool), then start the bot again. Nothing was changed.");
+                    isExiting = true;
+                    Application.Exit();
+                    return;
+                }
+
                 try
                 {
-                    var lines = File.ReadAllText(Program.ConfigPath);
                     Config = JsonSerializer.Deserialize(lines, ProgramConfigContext.Default.ProgramConfig) ?? new ProgramConfig();
                 }
-                catch (Exception ex)
+                catch (JsonException ex)
                 {
                     LogUtil.LogError($"Config corrupted, trying backup: {ex.Message}", "Config");
-
-                    // Try to load from most recent backup
-                    var backupFiles = Directory.GetFiles(Path.GetDirectoryName(Program.ConfigPath), "*.backup_*")
-                        .OrderByDescending(f => new FileInfo(f).LastWriteTime)
-                        .FirstOrDefault();
-
-                    if (backupFiles != null && File.Exists(backupFiles))
-                    {
-                        var backupLines = File.ReadAllText(backupFiles);
-                        Config = JsonSerializer.Deserialize(backupLines, ProgramConfigContext.Default.ProgramConfig) ?? new ProgramConfig();
-                        File.WriteAllText(Program.ConfigPath, backupLines); // Restore backup
-                        LogUtil.LogInfo($"Restored config from backup", "Config");
-                    }
-                    else
-                    {
-                        Config = new ProgramConfig();
-                        LogUtil.LogError("No valid backup found, using new config", "Config");
-                    }
+                    Config = LoadBackupConfig();
                 }
 
                 LogConfig.MaxArchiveFiles = Config.Hub.MaxArchiveFiles;
@@ -236,13 +230,9 @@ namespace SysBot.Pokemon.WinForms
 
         private void Main_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (IsUpdating)
-            {
-                return;
-            }
-
-            // If not exiting, minimize to tray instead
-            if (!isExiting)
+            // If not exiting, minimize to tray instead. An update closes the program
+            // for real, so it still stops the bots and saves like any other exit.
+            if (!isExiting && !IsUpdating)
             {
                 e.Cancel = true;
                 WindowState = FormWindowState.Minimized;
@@ -288,9 +278,10 @@ namespace SysBot.Pokemon.WinForms
                 }
             }
             catch { }
-            SaveCurrentConfig();
+            if (Config != null)
+                SaveCurrentConfig();
             var bots = RunningEnvironment;
-            if (!bots.IsRunning)
+            if (bots == null || !bots.IsRunning)
                 return;
 
             async Task WaitUntilNotRunning()
@@ -302,19 +293,98 @@ namespace SysBot.Pokemon.WinForms
             // Try to let all bots hard-stop before ending execution of the entire program.
             WindowState = FormWindowState.Minimized;
             ShowInTaskbar = false;
+            // Hard stop gives claimed GenPKM requests back and waits up to 5 s for those reports to send.
             bots.StopAll();
-            Task.WhenAny(WaitUntilNotRunning(), Task.Delay(5_000)).ConfigureAwait(true).GetAwaiter().GetResult();
+            Task.WhenAny(WaitUntilNotRunning(), Task.Delay(10_000)).ConfigureAwait(true).GetAwaiter().GetResult();
         }
 
+        /// <summary>
+        /// Loads config.json.backup (written at every clean exit). When no backup
+        /// parses, the corrupt config is moved aside rather than left for the next
+        /// autosave to overwrite, so its token and raid list can still be recovered by hand.
+        /// </summary>
+        private static string? ReadConfigText()
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    return File.ReadAllText(Program.ConfigPath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    if (attempt == 5)
+                    {
+                        LogUtil.LogError($"Could not read config.json: {ex.Message}", "Config");
+                        return null;
+                    }
+                    Thread.Sleep(300 * attempt);
+                }
+            }
+        }
+
+        private static ProgramConfig LoadBackupConfig()
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(Program.ConfigPath))!;
+            var candidates = new[] { Program.ConfigPath + ".backup" }
+                .Concat(Directory.GetFiles(dir, "*.backup_*").OrderByDescending(f => new FileInfo(f).LastWriteTime))
+                .Where(File.Exists);
+
+            foreach (var backup in candidates)
+            {
+                try
+                {
+                    var backupLines = File.ReadAllText(backup);
+                    var restored = JsonSerializer.Deserialize(backupLines, ProgramConfigContext.Default.ProgramConfig);
+                    if (restored == null)
+                        continue;
+                    File.WriteAllText(Program.ConfigPath, backupLines);
+                    LogUtil.LogInfo($"Restored config from {Path.GetFileName(backup)}", "Config");
+                    return restored;
+                }
+                catch (Exception ex)
+                {
+                    LogUtil.LogError($"Backup {Path.GetFileName(backup)} is unreadable too: {ex.Message}", "Config");
+                }
+            }
+
+            var aside = $"{Program.ConfigPath}.corrupt-{DateTime.Now:yyyyMMdd-HHmmss}";
+            try
+            {
+                File.Move(Program.ConfigPath, aside);
+                LogUtil.LogError($"No valid backup found, using new config. The damaged one was kept as {Path.GetFileName(aside)}.", "Config");
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"No valid backup found, using new config. Could not keep the damaged one: {ex.Message}", "Config");
+            }
+            return new ProgramConfig();
+        }
+
+        private readonly object _saveLock = new();
+
         private void SaveCurrentConfig()
+        {
+            lock (_saveLock)
+                SaveConfigLocked();
+        }
+
+        private void SaveConfigLocked()
         {
             try
             {
                 var cfg = GetCurrentConfiguration();
-                var lines = JsonSerializer.Serialize(cfg, ProgramConfigContext.Default.ProgramConfig);
+                string lines;
+                lock (RaidListSync.Gate)
+                    lines = JsonSerializer.Serialize(cfg, ProgramConfigContext.Default.ProgramConfig);
 
                 string tempPath = Program.ConfigPath + ".tmp";
-                File.WriteAllText(tempPath, lines);
+                using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(lines);
+                    stream.Write(bytes);
+                    stream.Flush(true);
+                }
 
                 // Antivirus and sync tools hold config.json open for a moment after
                 // each write, and replacing it then fails with "Access denied".
@@ -412,6 +482,7 @@ namespace SysBot.Pokemon.WinForms
             using (var form = new UpdateForm(true, newVersion, true))
                 form.ShowDialog(this);
             // Either the installer is taking over or the host skipped a required update.
+            isExiting = true;
             Application.Exit();
         }
 

@@ -175,14 +175,19 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             var request = context.Request;
             response = context.Response;
 
-            response.Headers.Add("Access-Control-Allow-Origin", "*");
-            response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
-
-            if (request.HttpMethod == "OPTIONS")
+            // The panel is served from this server, so it never needs CORS. Requiring a
+            // JSON body on POST stops another web page from driving the bots with a plain
+            // form or text/plain post, which a browser sends without asking first.
+            var localPath = request.Url?.LocalPath ?? string.Empty;
+            bool changesSomething = localPath.EndsWith("/command") || localPath is "/api/bot/command/all" or "/api/bot/update/all";
+            if (changesSomething && request.HttpMethod != "POST")
             {
-                response.StatusCode = 200;
-                response.Close();
+                response.StatusCode = 405;
+                return;
+            }
+            if (request.HttpMethod == "POST" && request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true)
+            {
+                response.StatusCode = 415;
                 return;
             }
 
@@ -685,8 +690,18 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             return JsonSerializer.Serialize(new { Bots = bots });
         }
 
+        if (!IsKnownInstance(port))
+            return CreateErrorResponse("Unknown instance");
+
         return QueryRemote(port, "LISTBOTS");
     }
+
+    private static readonly HashSet<string> PanelCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "start", "stop", "idle", "resume", "restart", "reboot", "refreshmap", "screenon", "screenoff",
+    };
+
+    private static bool IsKnownInstance(int port) => ScanRemoteInstances().Any(i => i.Port == port);
 
     private async Task<string> RunCommand(HttpListenerRequest request, int port)
     {
@@ -696,13 +711,16 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             var body = await reader.ReadToEndAsync();
             var commandRequest = JsonSerializer.Deserialize<BotCommandRequest>(body);
 
-            if (commandRequest == null)
+            if (commandRequest == null || !PanelCommands.Contains(commandRequest.Command))
                 return CreateErrorResponse("Invalid command request");
 
             if (port == _tcpPort)
             {
                 return RunLocalCommand(commandRequest.Command);
             }
+
+            if (!IsKnownInstance(port))
+                return CreateErrorResponse("Unknown instance");
 
             var tcpCommand = $"{commandRequest.Command}All".ToUpper();
             var result = QueryRemote(port, tcpCommand);
@@ -730,7 +748,7 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             var body = await reader.ReadToEndAsync();
             var commandRequest = JsonSerializer.Deserialize<BotCommandRequest>(body);
 
-            if (commandRequest == null)
+            if (commandRequest == null || !PanelCommands.Contains(commandRequest.Command))
                 return CreateErrorResponse("Invalid command request");
 
             var results = new List<CommandResponse>();
@@ -829,8 +847,9 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     {
         try
         {
-            using var client = new TcpClient();
-            client.Connect("127.0.0.1", port);
+            using var client = new TcpClient { ReceiveTimeout = 5000, SendTimeout = 5000 };
+            if (!client.ConnectAsync("127.0.0.1", port).Wait(TimeSpan.FromSeconds(2)))
+                return "Failed to connect";
 
             using var stream = client.GetStream();
             using var writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };

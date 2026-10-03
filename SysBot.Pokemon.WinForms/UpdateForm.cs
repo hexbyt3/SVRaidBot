@@ -1,4 +1,5 @@
 ﻿using System;
+using SysBot.Base;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -109,7 +110,11 @@ namespace SysBot.Pokemon.WinForms
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Main.IsUpdating = false;
+                LogUtil.LogError($"Update failed: {ex.Message}", "Update");
+            }
         }
 
         private void UpdateFormText()
@@ -153,6 +158,7 @@ namespace SysBot.Pokemon.WinForms
             }
             catch (Exception ex)
             {
+                Main.IsUpdating = false;
                 MessageBox.Show($"Update failed: {ex.Message}", "Update Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
@@ -231,6 +237,7 @@ namespace SysBot.Pokemon.WinForms
             }
             catch (Exception ex)
             {
+                Main.IsUpdating = false;
                 MessageBox.Show($"Failed to install update: {ex.Message}", "Update Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }

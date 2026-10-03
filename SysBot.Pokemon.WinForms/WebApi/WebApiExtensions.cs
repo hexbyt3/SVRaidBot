@@ -142,7 +142,6 @@ public static class WebApiExtensions
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
-                Verb = "runas" // Request admin privileges
             };
 
             using var process = System.Diagnostics.Process.Start(startInfo);

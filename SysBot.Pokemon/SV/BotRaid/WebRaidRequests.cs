@@ -91,12 +91,20 @@ namespace SysBot.Pokemon.SV.BotRaid
                     return (WebClaimResult.Unreachable, null);
                 }
 
-                var reply = await response.Content.ReadFromJsonAsync<ClaimReply>(cancellationToken: token).ConfigureAwait(false);
+                // The site has already assigned the request by now, so the reply is read
+                // even when hosting is stopping; otherwise the request would sit claimed
+                // until its lease ran out. The client's own timeout still bounds it.
+                var reply = await response.Content.ReadFromJsonAsync<ClaimReply>(cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 if (!string.IsNullOrEmpty(reply?.Notice) && reply.Notice != _lastNotice)
                     _log($"GenPKM raid requests: {reply.Notice}");
                 _lastNotice = reply?.Notice;
                 if (reply?.Request is null)
                     return (WebClaimResult.NothingWaiting, null);
+                if (token.IsCancellationRequested)
+                {
+                    Report(reply.Request, "released", "The raid bot stopped before it could host your raid. You are back in line for the next free bot.");
+                    token.ThrowIfCancellationRequested();
+                }
                 return (WebClaimResult.Claimed, reply.Request);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -182,6 +190,10 @@ namespace SysBot.Pokemon.SV.BotRaid
                 {
                     await SendWithRetry(request, update).ConfigureAwait(false);
                 }
+                catch (Exception ex)
+                {
+                    _log($"GenPKM raid request #{request.Id}: the '{update.Status}' update failed ({ex.Message}).");
+                }
                 finally
                 {
                     Interlocked.Decrement(ref _pendingReports);
@@ -225,7 +237,10 @@ namespace SysBot.Pokemon.SV.BotRaid
                 }
 
                 if (attempt >= RetryDelays.Length)
+                {
+                    _log($"GenPKM raid request #{request.Id}: the site kept failing the '{update.Status}' update, so it was dropped.");
                     return;
+                }
                 await Task.Delay(RetryDelays[attempt]).ConfigureAwait(false);
             }
         }
@@ -277,8 +292,8 @@ namespace SysBot.Pokemon.SV.BotRaid
     /// </summary>
     public static class WebRaidRules
     {
-        public static bool IsValidSeed(string seed) =>
-            seed.Length == 8 && uint.TryParse(seed, System.Globalization.NumberStyles.AllowHexSpecifier, null, out _);
+        public static bool IsValidSeed(string? seed) =>
+            seed is { Length: 8 } && uint.TryParse(seed, System.Globalization.NumberStyles.AllowHexSpecifier, null, out _);
 
         /// <summary>Same matrix as the Discord request command: story progress 3-6, 3★ minimum.</summary>
         public static bool StarsFitProgress(int stars, int storyProgress) => storyProgress switch

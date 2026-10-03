@@ -1117,6 +1117,11 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];
+                if (raid.WebRequest is not null)
+                {
+                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
+                    return;
+                }
                 raid.IsCoded = !raid.IsCoded;
                 var m = raid.IsCoded ? "coded" : "uncoded";
                 var msg = $"Raid for {raid.Title} | {raid.Seed:X8} is now {m}!";
@@ -1136,6 +1141,11 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];
+                if (raid.WebRequest is not null)
+                {
+                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
+                    return;
+                }
                 raid.Title = title;
                 var msg = $"Raid Title for {raid.Title} | {raid.Seed:X8} has been changed to: {title}!";
                 await ReplyAsync(msg).ConfigureAwait(false);
@@ -1182,6 +1192,11 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             if (index >= 0 && index < list.Count)
             {
                 var raid = list[index];
+                if (raid.WebRequest is not null)
+                {
+                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
+                    return;
+                }
                 raid.PartyPK = new[] { content };
                 var m = string.Join("\n", raid.PartyPK);
                 var msg = $"RaidPK for {raid.Title} | {raid.Seed:X8} has been updated to:\n{m}!";
