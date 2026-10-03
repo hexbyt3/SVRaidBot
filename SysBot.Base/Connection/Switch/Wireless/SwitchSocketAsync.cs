@@ -142,7 +142,16 @@ namespace SysBot.Base
                     var received = await ReceiveResponseAsync(mem, ct).ConfigureAwait(false);
                     if (received < size)
                         throw new SwitchReadFailedException($"The console could not read that memory ({received} of {size} bytes came back).");
-                    return DecodeResult(mem, length);
+                    if (mem.Span[size - 1] != (byte)'\n')
+                        throw Resync($"The console sent a longer reply than {size} bytes.");
+                    try
+                    {
+                        return DecodeResult(mem, length);
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                        throw Resync("The console's reply was not hex.");
+                    }
                 }
                 finally
                 {
@@ -369,7 +378,7 @@ namespace SysBot.Base
         {
             List<byte> flexBuffer = new();
             int available = Connection.Available;
-            Connection.ReceiveTimeout = 1_000;
+            Connection.ReceiveTimeout = 5_000;
 
             do
             {
@@ -382,6 +391,7 @@ namespace SysBot.Base
                 catch (Exception ex)
                 {
                     LogError($"Socket exception thrown while receiving data:\n{ex.Message}");
+                    Resync("The screenshot stopped arriving partway.");
                     return Array.Empty<byte>();
                 }
 
@@ -398,6 +408,22 @@ namespace SysBot.Base
             var result = await ReadBytesFromCmdAsync(SwitchCommand.GetUnixTime(), 8, token).ConfigureAwait(false);
             Array.Reverse(result);
             return BitConverter.ToInt64(result, 0);
+        }
+
+        /// <summary>
+        /// Replies carry no request id, so once one reply is left half-read every
+        /// later read takes the leftover of the one before it. A Wi-Fi stall during
+        /// a screenshot did that and the bot read garbage for eight hours. A fresh
+        /// socket is the only way back in step. Call it while holding <see cref="_io"/>;
+        /// the IOException it returns makes <see cref="RetryOperation"/> try again.
+        /// </summary>
+        private IOException Resync(string reason)
+        {
+            LogError($"{reason} Replies are out of step; reconnecting to start clean.");
+            try { Connection.Close(); } catch { }
+            InitializeSocket();
+            Connect();
+            return new IOException(reason);
         }
 
         private void HandleDisconnect()

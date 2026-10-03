@@ -583,6 +583,8 @@ namespace SysBot.Pokemon.SV.BotRaid
                 var raidsHosted = 0;
                 int consecutiveErrors = 0;
                 const int maxConsecutiveErrors = 3;
+                int offsetFailures = 0;
+                const int maxOffsetFailures = 10;
 
                 while (!token.IsCancellationRequested)
                 {
@@ -609,10 +611,18 @@ namespace SysBot.Pokemon.SV.BotRaid
                         try
                         {
                             await InitializeSessionOffsets(token).ConfigureAwait(false);
+                            offsetFailures = 0;
                         }
-                        catch (Exception ex)
+                        catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             Log($"Error initializing session offsets: {ex.Message}");
+                            if (++offsetFailures >= maxOffsetFailures)
+                            {
+                                Log($"Could not read the game {offsetFailures} times in a row, rebooting game");
+                                offsetFailures = 0;
+                                await PerformRebootAndReset(token).ConfigureAwait(false);
+                                continue;
+                            }
                             await Task.Delay(2000, token).ConfigureAwait(false);
                             continue;
                         }
@@ -2824,8 +2834,8 @@ namespace SysBot.Pokemon.SV.BotRaid
                 attempts++;
                 if (attempts >= maxAttempts)
                 {
-                    Log($"Recovery exceeded maximum attempts ({maxAttempts})");
-                    break;
+                    Log($"Recovery exceeded maximum attempts ({maxAttempts}). Failed to recover to overworld.");
+                    return false;
                 }
 
                 for (int i = 0; i < 20; i++)
@@ -2837,13 +2847,6 @@ namespace SysBot.Pokemon.SV.BotRaid
                         return true;
                     }
                 }
-            }
-
-            // We didn't make it for some reason.
-            if (!await IsOnOverworld(_overworldOffset, token).ConfigureAwait(false))
-            {
-                Log("Failed to recover to overworld, rebooting the game.");
-                return false;
             }
 
             await Task.Delay(1_000, token).ConfigureAwait(false);

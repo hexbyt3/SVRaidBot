@@ -96,5 +96,36 @@ namespace SysBot.Tests
             (await socket.ReadBytesAbsoluteAsync(0x1000, 4, CancellationToken.None)).Should().Equal(1, 2, 3, 4);
             await server;
         }
+
+        // The 10/03 outage: a screenshot left half-read, so every reply after it
+        // was the tail of the one before. The read must reconnect and get a clean
+        // answer, not decode garbage.
+        [Theory]
+        [InlineData("0102030405060708\n")] // longer than asked for
+        [InlineData("01\n20304\n")]        // another reply's end inside this one
+        public async Task OutOfStepReplyReconnectsAndRetries(string firstReply)
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var server = Task.Run(async () =>
+            {
+                var buffer = new byte[256];
+                foreach (var reply in new[] { firstReply, "AABBCCDD\n" })
+                {
+                    using var client = await listener.AcceptTcpClientAsync();
+                    var stream = client.GetStream();
+                    await stream.ReadAsync(buffer);
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes(reply));
+                    await Task.Delay(300);
+                }
+                listener.Stop();
+            });
+            var socket = SwitchSocketAsync.CreateInstance(new SwitchConnectionConfig { IP = "127.0.0.1", Port = port });
+            socket.Connect();
+
+            (await socket.ReadBytesAbsoluteAsync(0x1000, 4, CancellationToken.None)).Should().Equal(0xAA, 0xBB, 0xCC, 0xDD);
+            await server;
+        }
     }
 }

@@ -315,7 +315,21 @@ namespace SysBot.Pokemon.WinForms
 
                 string tempPath = Program.ConfigPath + ".tmp";
                 File.WriteAllText(tempPath, lines);
-                File.Move(tempPath, Program.ConfigPath, true);
+
+                // Antivirus and sync tools hold config.json open for a moment after
+                // each write, and replacing it then fails with "Access denied".
+                for (int attempt = 1; ; attempt++)
+                {
+                    try
+                    {
+                        File.Move(tempPath, Program.ConfigPath, true);
+                        break;
+                    }
+                    catch (Exception ex) when (attempt < 5 && ex is IOException or UnauthorizedAccessException)
+                    {
+                        Thread.Sleep(200 * attempt);
+                    }
+                }
             }
             catch (Exception ex)
             {
