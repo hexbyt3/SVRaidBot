@@ -37,6 +37,7 @@ namespace SysBot.Base
             }
 
             Log("Connecting to device...");
+            _closedByOwner = false;
             int retryCount = 0;
             const int maxRetries = 10;
 
@@ -57,6 +58,9 @@ namespace SysBot.Base
                 }
                 catch (Exception ex)
                 {
+                    // A timed-out BeginConnect is still pending on this socket; retry on a new one.
+                    CloseQuietly();
+                    InitializeSocket();
                     retryCount++;
                     Log($"Connection attempt {retryCount} failed: {ex.Message}");
                     if (retryCount >= maxRetries)
@@ -80,85 +84,134 @@ namespace SysBot.Base
         public override void Disconnect()
         {
             Log("Disconnecting from device...");
-            IAsyncResult result = Connection.BeginDisconnect(false, null, null);
-            bool success = result.AsyncWaitHandle.WaitOne(5000, true);
-            if (!success || Connection.Connected)
+            if (Connection.Connected)
             {
-                InitializeSocket();
-                throw new Exception("Failed to disconnect from device.");
+                try { Connection.Shutdown(SocketShutdown.Both); } catch { }
             }
-            Connection.EndDisconnect(result);
-            Log("Disconnected! Resetting Socket.");
+            CloseQuietly();
             InitializeSocket();
+            _dirty = false;
+            _closedByOwner = true;
+            Log("Disconnected! Resetting Socket.");
+        }
+
+        private void CloseQuietly()
+        {
+            try { Connection.Close(); } catch { }
         }
 
         // One command and its reply at a time. The bot loop and the web panel share
         // this socket; two requests in flight at once can each take the other's reply.
         private readonly SemaphoreSlim _io = new(1, 1);
 
+        // Replies carry no request id, so once one is left half-read every later read
+        // takes the leftover of the one before it. A Wi-Fi stall during a screenshot
+        // did that on 10/03 and the bot read garbage for eight hours. Any exchange that
+        // does not end cleanly marks the socket dirty, and the next one starts on a
+        // fresh connection.
+        private bool _dirty;
+        // Set by Disconnect: a stopped bot stays disconnected until Connect, rather than
+        // the next stray command quietly reopening sys-botbase's only connection.
+        private volatile bool _closedByOwner;
+        public TimeSpan ReplyTimeout { get; set; } = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
+
+        private async Task<T> ExchangeAsync<T>(byte[] command, Func<CancellationToken, ValueTask<T>> receive, CancellationToken token)
+        {
+            await _io.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                if (_closedByOwner)
+                    throw new InvalidOperationException("Not connected to the console; start the bot first.");
+                if (_dirty || !Connection.Connected || Connection.Available > 0)
+                    await ReconnectAsync(token).ConfigureAwait(false);
+
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                timeout.CancelAfter(ReplyTimeout);
+                try
+                {
+                    await Connection.SendAsync(command, SocketFlags.None, timeout.Token).ConfigureAwait(false);
+                    return await receive(timeout.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not SwitchReadFailedException)
+                {
+                    _dirty = true;
+                    if (ex is OperationCanceledException && !token.IsCancellationRequested)
+                        throw new IOException("The console stopped answering.", ex);
+                    throw;
+                }
+            }
+            finally
+            {
+                _io.Release();
+            }
+        }
+
+        private async Task ReconnectAsync(CancellationToken token)
+        {
+            if (_dirty)
+                LogError("The console's replies are out of step; reconnecting to start clean.");
+            else
+                Log("Connection lost. Reconnecting...");
+
+            _dirty = true;
+            CloseQuietly();
+            InitializeSocket();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(ConnectTimeout);
+            try
+            {
+                await Connection.ConnectAsync(Info.IP, Info.Port, timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                throw new IOException("Could not reconnect to the console.");
+            }
+            _dirty = false;
+            Log("Reconnected!");
+        }
+
+        private static ValueTask<int> NoReply(CancellationToken _) => ValueTask.FromResult(0);
+
         /// <summary> Only call this if you are sending small commands. </summary>
         public async Task<int> SendAsync(byte[] buffer, CancellationToken token)
         {
-            return await RetryOperation(async (ct) =>
+            return await RetryOperation(async ct =>
             {
-                await _io.WaitAsync(ct).ConfigureAwait(false);
-                try
-                {
-                    return await Connection.SendAsync(buffer, ct).ConfigureAwait(false);
-                }
-                finally
-                {
-                    _io.Release();
-                }
-            }, token);
-        }
-
-        public async Task EnsureConnectedAsync(CancellationToken token)
-        {
-            if (!Connected)
-            {
-                Log("Connection lost. Attempting to reconnect...");
-                await RetryOperation(async (ct) =>
-                {
-                    Reset();
-                    Connect();
-                    return true;
-                }, token);
-            }
+                await ExchangeAsync(buffer, NoReply, ct).ConfigureAwait(false);
+                return buffer.Length;
+            }, token).ConfigureAwait(false);
         }
 
         private async Task<byte[]> ReadBytesFromCmdAsync(byte[] cmd, int length, CancellationToken token)
         {
-            return await RetryOperation(async (ct) =>
+            var size = (length * 2) + 1;
+            return await RetryOperation(ct => ExchangeAsync(cmd, async t =>
             {
-                await EnsureConnectedAsync(ct);
-                var size = (length * 2) + 1;
                 var buffer = ArrayPool<byte>.Shared.Rent(size);
-                await _io.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    await Connection.SendAsync(cmd, ct).ConfigureAwait(false);
                     var mem = buffer.AsMemory()[..size];
-                    var received = await ReceiveResponseAsync(mem, ct).ConfigureAwait(false);
-                    if (received < size)
-                        throw new SwitchReadFailedException($"The console could not read that memory ({received} of {size} bytes came back).");
-                    if (mem.Span[size - 1] != (byte)'\n')
-                        throw Resync($"The console sent a longer reply than {size} bytes.");
+                    var received = await ReceiveResponseAsync(mem, t).ConfigureAwait(false);
+                    // sys-botbase answers a peek it cannot read with a bare "\n".
+                    if (received == 1)
+                        throw new SwitchReadFailedException($"The console could not read that memory (1 of {size} bytes came back).");
+                    if (received != size || mem.Span[size - 1] != (byte)'\n')
+                        throw new IOException($"The console sent a {received}-byte reply where {size} were expected.");
                     try
                     {
                         return DecodeResult(mem, length);
                     }
                     catch (ArgumentOutOfRangeException)
                     {
-                        throw Resync("The console's reply was not hex.");
+                        throw new IOException("The console's reply was not hex.");
                     }
                 }
                 finally
                 {
-                    _io.Release();
                     ArrayPool<byte>.Shared.Return(buffer, true);
                 }
-            }, token);
+            }, ct), token).ConfigureAwait(false);
         }
 
         private static byte[] DecodeResult(ReadOnlyMemory<byte> buffer, int length)
@@ -228,7 +281,6 @@ namespace SysBot.Base
 
         private async Task<byte[]> Read(ulong offset, int length, SwitchOffsetType type, CancellationToken token)
         {
-            await EnsureConnectedAsync(token);
             var method = type.GetReadMethod();
             if (length <= MaximumTransferSize)
             {
@@ -247,7 +299,6 @@ namespace SysBot.Base
                 var cmd = method(offset + (uint)i, len);
                 var bytes = await ReadBytesFromCmdAsync(cmd, len, token).ConfigureAwait(false);
                 bytes.CopyTo(result, i);
-                await Task.Delay((MaximumTransferSize / DelayFactor) + BaseDelay, token).ConfigureAwait(false);
             }
             return result;
         }
@@ -281,18 +332,14 @@ namespace SysBot.Base
 
         public async Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token)
         {
-            var buffer = new byte[length];
-            await _io.WaitAsync(token).ConfigureAwait(false);
-            try
+            return await RetryOperation(ct => ExchangeAsync(command, async t =>
             {
-                await Connection.SendAsync(command, token).ConfigureAwait(false);
-                await ReceiveResponseAsync(buffer, token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _io.Release();
-            }
-            return buffer;
+                var buffer = new byte[length];
+                var received = await ReceiveResponseAsync(buffer, t).ConfigureAwait(false);
+                if (buffer[received - 1] != (byte)'\n')
+                    throw new IOException($"The console sent a reply longer than {length} bytes.");
+                return buffer;
+            }, ct), token).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -350,57 +397,33 @@ namespace SysBot.Base
 
         public async Task<byte[]> PixelPeek(CancellationToken token)
         {
-            byte[] data;
-            await _io.WaitAsync(token).ConfigureAwait(false);
+            // No retry: a missed screenshot only costs the embed its picture.
             try
             {
-                await Connection.SendAsync(SwitchCommand.PixelPeek(), token).ConfigureAwait(false);
-                data = await FlexRead(token).ConfigureAwait(false);
+                var data = await ExchangeAsync(SwitchCommand.PixelPeek(), ReceiveLineAsync, token).ConfigureAwait(false);
+                return Decoder.ConvertHexByteStringToBytes(data);
             }
-            finally
+            catch (Exception ex) when (ex is IOException or SocketException or ArgumentOutOfRangeException)
             {
-                _io.Release();
+                _dirty = true;
+                LogError($"Could not read the screenshot: {ex.Message}");
+                return [];
             }
-            var result = Array.Empty<byte>();
-            try
-            {
-                result = Decoder.ConvertHexByteStringToBytes(data);
-            }
-            catch (Exception e)
-            {
-                LogError($"Malformed screenshot data received:\n{e.Message}");
-            }
-
-            return result;
         }
 
-        private async Task<byte[]> FlexRead(CancellationToken token)
+        private async ValueTask<byte[]> ReceiveLineAsync(CancellationToken token)
         {
-            List<byte> flexBuffer = new();
-            int available = Connection.Available;
-            Connection.ReceiveTimeout = 5_000;
-
-            do
+            var data = new ArrayBufferWriter<byte>(0x40000);
+            while (true)
             {
-                byte[] buffer = new byte[available];
-                try
-                {
-                    Connection.Receive(buffer, available, SocketFlags.None);
-                    flexBuffer.AddRange(buffer);
-                }
-                catch (Exception ex)
-                {
-                    LogError($"Socket exception thrown while receiving data:\n{ex.Message}");
-                    Resync("The screenshot stopped arriving partway.");
-                    return Array.Empty<byte>();
-                }
-
-                await Task.Delay(MaximumTransferSize / DelayFactor + BaseDelay, token).ConfigureAwait(false);
-                available = Connection.Available;
-            } while (flexBuffer.Count == 0 || flexBuffer.Last() != (byte)'\n');
-
-            Connection.ReceiveTimeout = 0;
-            return flexBuffer.ToArray();
+                var chunk = data.GetMemory(0x10000);
+                int count = await Connection.ReceiveAsync(chunk, SocketFlags.None, token).ConfigureAwait(false);
+                if (count == 0)
+                    throw new SocketException((int)SocketError.ConnectionReset);
+                data.Advance(count);
+                if (data.WrittenSpan[^1] == (byte)'\n')
+                    return data.WrittenSpan[..^1].ToArray();
+            }
         }
 
         public async Task<long> GetUnixTime(CancellationToken token)
@@ -408,36 +431,6 @@ namespace SysBot.Base
             var result = await ReadBytesFromCmdAsync(SwitchCommand.GetUnixTime(), 8, token).ConfigureAwait(false);
             Array.Reverse(result);
             return BitConverter.ToInt64(result, 0);
-        }
-
-        /// <summary>
-        /// Replies carry no request id, so once one reply is left half-read every
-        /// later read takes the leftover of the one before it. A Wi-Fi stall during
-        /// a screenshot did that and the bot read garbage for eight hours. A fresh
-        /// socket is the only way back in step. Call it while holding <see cref="_io"/>;
-        /// the IOException it returns makes <see cref="RetryOperation"/> try again.
-        /// </summary>
-        private IOException Resync(string reason)
-        {
-            LogError($"{reason} Replies are out of step; reconnecting to start clean.");
-            try { Connection.Close(); } catch { }
-            InitializeSocket();
-            Connect();
-            return new IOException(reason);
-        }
-
-        private void HandleDisconnect()
-        {
-            Log("Unexpected disconnection detected. Attempting to reconnect...");
-            try
-            {
-                Reset();
-                Connect();
-            }
-            catch (Exception ex)
-            {
-                LogError($"Failed to reconnect: {ex.Message}");
-            }
         }
 
         private async Task<T> RetryOperation<T>(Func<CancellationToken, Task<T>> operation, CancellationToken token, int maxRetries = 3)

@@ -7,9 +7,9 @@ namespace SysBot.Base
 {
     public static class EchoUtil
     {
-        public static readonly List<Action<string>> Forwarders = new();
-        public static readonly List<Action<string, Embed>> EmbedForwarders = new();
-        public static readonly List<Func<byte[], string, EmbedBuilder, Task<IUserMessage>>> RaidForwarders = new();
+        public static readonly SyncList<Action<string>> Forwarders = new();
+        public static readonly SyncList<Action<string, Embed>> EmbedForwarders = new();
+        public static readonly SyncList<Func<byte[], string, EmbedBuilder, Task<IUserMessage>>> RaidForwarders = new();
 
         public static void Echo(string message)
         {

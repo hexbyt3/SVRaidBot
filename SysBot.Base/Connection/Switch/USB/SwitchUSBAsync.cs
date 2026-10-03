@@ -48,8 +48,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.GetMainNsoBase(false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.GetMainNsoBase(false));
                 return BitConverter.ToUInt64(baseBytes, 0);
             }, token);
         }
@@ -58,8 +57,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.GetHeapBase(false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.GetHeapBase(false));
                 return BitConverter.ToUInt64(baseBytes, 0);
             }, token);
         }
@@ -68,8 +66,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.GetTitleID(false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.GetTitleID(false));
                 return BitConverter.ToUInt64(baseBytes, 0).ToString("X16").Trim();
             }, token);
         }
@@ -78,8 +75,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.GetBotbaseVersion(false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.GetBotbaseVersion(false));
                 return Encoding.UTF8.GetString(baseBytes).Trim('\0');
             }, token);
         }
@@ -88,8 +84,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.GetGameInfo(info, false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.GetGameInfo(info, false));
                 return Encoding.UTF8.GetString(baseBytes).Trim('\0');
             }, token);
         }
@@ -98,8 +93,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.IsProgramRunning(pid, false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.IsProgramRunning(pid, false));
                 return baseBytes.Length == 1 && BitConverter.ToBoolean(baseBytes, 0);
             }, token);
         }
@@ -108,8 +102,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(command);
-                return ReadBulkUSB();
+                return Exchange(command);
             }, token);
         }
 
@@ -122,8 +115,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.PointerPeek(jumps, size, false));
-                return ReadBulkUSB();
+                return Exchange(SwitchCommand.PointerPeek(jumps, size, false));
             }, token);
         }
 
@@ -139,8 +131,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.PointerAll(jumps, false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.PointerAll(jumps, false));
                 return BitConverter.ToUInt64(baseBytes, 0);
             }, token);
         }
@@ -149,8 +140,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.PointerRelative(jumps, false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.PointerRelative(jumps, false));
                 return BitConverter.ToUInt64(baseBytes, 0);
             }, token);
         }
@@ -159,8 +149,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.PixelPeek(false));
-                return PixelPeekUSB();
+                return ExchangeScreenshot(SwitchCommand.PixelPeek(false));
             }, token);
         }
 
@@ -168,8 +157,7 @@ namespace SysBot.Base
         {
             return Task.Run(() =>
             {
-                Send(SwitchCommand.GetUnixTime(false));
-                byte[] baseBytes = ReadBulkUSB();
+                byte[] baseBytes = Exchange(SwitchCommand.GetUnixTime(false));
                 return BitConverter.ToInt64(baseBytes, 0);
             }, token);
         }

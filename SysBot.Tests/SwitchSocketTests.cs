@@ -100,10 +100,9 @@ namespace SysBot.Tests
         // The 10/03 outage: a screenshot left half-read, so every reply after it
         // was the tail of the one before. The read must reconnect and get a clean
         // answer, not decode garbage.
-        [Theory]
-        [InlineData("0102030405060708\n")] // longer than asked for
-        [InlineData("01\n20304\n")]        // another reply's end inside this one
-        public async Task OutOfStepReplyReconnectsAndRetries(string firstReply)
+        // A fake sys-botbase that answers one command per connection, so a test can
+        // see the client drop a connection and come back on a new one.
+        private static (SwitchSocketAsync Socket, Task Server) StartPerConnection(params string?[] replies)
         {
             var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
@@ -111,20 +110,48 @@ namespace SysBot.Tests
             var server = Task.Run(async () =>
             {
                 var buffer = new byte[256];
-                foreach (var reply in new[] { firstReply, "AABBCCDD\n" })
+                TcpClient? previous = null;
+                foreach (var reply in replies)
                 {
-                    using var client = await listener.AcceptTcpClientAsync();
+                    // Keep the last connection open until the client gives up on it.
+                    var client = await listener.AcceptTcpClientAsync();
+                    previous?.Dispose();
+                    previous = client;
                     var stream = client.GetStream();
                     await stream.ReadAsync(buffer);
-                    await stream.WriteAsync(Encoding.ASCII.GetBytes(reply));
-                    await Task.Delay(300);
+                    if (reply != null)
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes(reply));
                 }
+                await Task.Delay(200);
+                previous?.Dispose();
                 listener.Stop();
             });
             var socket = SwitchSocketAsync.CreateInstance(new SwitchConnectionConfig { IP = "127.0.0.1", Port = port });
+            socket.ReplyTimeout = TimeSpan.FromMilliseconds(500);
             socket.Connect();
+            return (socket, server);
+        }
 
+        [Theory]
+        [InlineData("0102030405060708\n")] // longer than asked for
+        [InlineData("01\n20304\n")]        // another reply's end inside this one
+        [InlineData("AB\n")]               // the tail of an earlier reply
+        [InlineData(null)]                 // no answer at all
+        public async Task OutOfStepReplyReconnectsAndRetries(string? firstReply)
+        {
+            var (socket, server) = StartPerConnection(firstReply, "AABBCCDD\n");
             (await socket.ReadBytesAbsoluteAsync(0x1000, 4, CancellationToken.None)).Should().Equal(0xAA, 0xBB, 0xCC, 0xDD);
+            await server;
+        }
+
+        // The 10/03 outage itself: the screenshot stalls partway, then the next read
+        // must not be fed the rest of the picture.
+        [Fact]
+        public async Task StalledScreenshotDoesNotPoisonTheNextRead()
+        {
+            var (socket, server) = StartPerConnection("FFD8FFE000104A46", "01020304\n");
+            (await socket.PixelPeek(CancellationToken.None)).Should().BeEmpty();
+            (await socket.ReadBytesAbsoluteAsync(0x1000, 4, CancellationToken.None)).Should().Equal(1, 2, 3, 4);
             await server;
         }
     }

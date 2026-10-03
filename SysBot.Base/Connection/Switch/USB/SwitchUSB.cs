@@ -1,6 +1,7 @@
 ﻿using LibUsbDotNet;
 using LibUsbDotNet.Main;
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -129,18 +130,40 @@ namespace SysBot.Base
                 return ReadInternal(buffer);
         }
 
-        protected byte[] Read(ulong offset, int length, Func<ulong, int, byte[]> method)
+        // One command and its reply at a time: two callers that both send before
+        // either reads would each take the other's reply.
+        protected byte[] Exchange(byte[] command)
         {
-            var cmd = method(offset, length);
-            SendInternal(cmd);
-            return ReadBulkUSB();
+            lock (_sync)
+            {
+                SendInternal(command);
+                return ReadBulkUSB();
+            }
         }
 
-        protected byte[] ReadMulti(IReadOnlyDictionary<ulong, int> offsetSizes, Func<IReadOnlyDictionary<ulong, int>, byte[]> method)
+        protected byte[] ExchangeScreenshot(byte[] command)
         {
-            var cmd = method(offsetSizes);
-            SendInternal(cmd);
-            return ReadBulkUSB();
+            lock (_sync)
+            {
+                SendInternal(command);
+                return PixelPeekUSB();
+            }
+        }
+
+        protected byte[] Read(ulong offset, int length, Func<ulong, int, byte[]> method) => Exchange(method(offset, length));
+
+        protected byte[] ReadMulti(IReadOnlyDictionary<ulong, int> offsetSizes, Func<IReadOnlyDictionary<ulong, int>, byte[]> method) => Exchange(method(offsetSizes));
+
+        private int ReadReplySize()
+        {
+            byte[] sizeOfReturn = new byte[4];
+            var ec = reader!.Read(sizeOfReturn, 5000, out int got);
+            if (ec != ErrorCode.None || got != 4)
+            {
+                Disconnect();
+                throw new IOException($"The console did not say how long its reply is ({ec}).");
+            }
+            return BitConverter.ToInt32(sizeOfReturn, 0);
         }
 
         protected byte[] ReadBulkUSB()
@@ -154,10 +177,7 @@ namespace SysBot.Base
                     throw new Exception("USB device not found or not connected.");
 
                 // Let usb-botbase tell us the response size.
-                byte[] sizeOfReturn = new byte[4];
-                reader.Read(sizeOfReturn, 5000, out _);
-
-                int size = BitConverter.ToInt32(sizeOfReturn, 0);
+                int size = ReadReplySize();
                 byte[] buffer = new byte[size];
 
                 // Loop until we have read everything.
@@ -242,12 +262,10 @@ namespace SysBot.Base
             Thread.Sleep(1);
             lock (_sync)
             {
-                byte[] sizeOfReturn = new byte[4];
                 if (reader == null)
                     throw new Exception("USB device not found or not connected.");
 
-                reader.Read(sizeOfReturn, 5000, out _);
-                int size = BitConverter.ToInt32(sizeOfReturn, 0);
+                int size = ReadReplySize();
                 byte[] buffer = new byte[size];
                 int transfSize = 0;
                 while (transfSize < size)
