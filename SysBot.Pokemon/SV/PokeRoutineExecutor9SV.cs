@@ -507,6 +507,14 @@ namespace SysBot.Pokemon.SV
         private readonly Dictionary<uint, ulong> _keyEntries = [];
         private const ulong KeyEntrySize = 48;
 
+        // The host may have restarted the game while the bot was stopped, which moves
+        // every block; Stop then Start keeps this same object, so the cache must go.
+        public override async Task InitialStartup(CancellationToken token)
+        {
+            ClearBlockCache();
+            await base.InitialStartup(token).ConfigureAwait(false);
+        }
+
         public void ClearBlockCache()
         {
             lock (_keyEntries)
@@ -532,6 +540,11 @@ namespace SysBot.Pokemon.SV
                 byte[] found = await SwitchConnection.ReadBytesAbsoluteAsync(entry, 4, token).ConfigureAwait(false);
                 if (BitConverter.ToUInt32(found) == key)
                     return true;
+            }
+            catch (SwitchReadFailedException)
+            {
+                // The game moved since the address was cached (it was restarted while
+                // the bot was stopped); search for the block again.
             }
             catch
             {
