@@ -1,5 +1,6 @@
 ﻿using System;
 using SysBot.Base;
+using SysBot.Pokemon.SV.BotRaid.Helpers;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -189,37 +190,8 @@ namespace SysBot.Pokemon.WinForms
         {
             try
             {
-                string currentExePath = Application.ExecutablePath;
-                string applicationDirectory = Path.GetDirectoryName(currentExePath) ?? "";
-                string executableName = Path.GetFileName(currentExePath);
-                string backupPath = Path.Combine(applicationDirectory, $"{executableName}.backup");
-
-                // Create batch file for update process
-                string batchPath = Path.Combine(Path.GetTempPath(), "UpdateSVRaidBot.bat");
-                string batchContent = @$"
-                                        @echo off
-                                        timeout /t 2 /nobreak >nul
-                                        echo Updating SVRaidBot...
-
-                                        rem Backup current version
-                                        if exist ""{currentExePath}"" (
-                                            if exist ""{backupPath}"" (
-                                                del ""{backupPath}""
-                                            )
-                                            move ""{currentExePath}"" ""{backupPath}""
-                                        )
-
-                                        rem Install new version
-                                        move ""{downloadedFilePath}"" ""{currentExePath}""
-
-                                        rem Start new version
-                                        start """" ""{currentExePath}""
-
-                                        rem Clean up
-                                        del ""%~f0""
-                                        ";
-
-                File.WriteAllText(batchPath, batchContent);
+                string batchPath = UpdateScript.PathFor(Environment.ProcessId);
+                File.WriteAllText(batchPath, UpdateScript.Build(Environment.ProcessId, Application.ExecutablePath, downloadedFilePath));
 
                 // Start the update batch file
                 ProcessStartInfo startInfo = new ProcessStartInfo
