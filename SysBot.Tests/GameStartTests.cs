@@ -27,6 +27,7 @@ namespace SysBot.Tests
             public bool GameRunning;
             public bool StartsFromFirstTile = true;
             public int TitleReplyDelay;
+            public int Language = 1;
             private int _leftPresses;
 
             public FakeSwitch()
@@ -62,6 +63,11 @@ namespace SysBot.Tests
                     else if (line == "click A" && StartsFromFirstTile && _leftPresses >= 15)
                         GameRunning = true;
 
+                    if (line == "getSystemLanguage")
+                    {
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes(Language + "\n"));
+                        continue;
+                    }
                     if (line != "getTitleID")
                         continue;
                     if (TitleReplyDelay > 0)
@@ -142,6 +148,22 @@ namespace SysBot.Tests
             presses.Take(5).Should().Equal("B", "HOME", "DDOWN", "DDOWN", "DUP");
             presses.Skip(5).Take(15).Should().AllBe("DLEFT");
             presses[20].Should().Be("A");
+            bot.Connection.Disconnect();
+            fake.Listener.Stop();
+        }
+
+        // 10/07: the rollback slipped into System > Language and left the Switch in German.
+        [Fact]
+        public async Task SystemLanguageIsRead()
+        {
+            var fake = new FakeSwitch();
+            var bot = Connect(fake);
+            (await bot.GetSystemLanguage(CancellationToken.None)).Should().Be(1);
+            fake.Language = 3;
+            var german = await bot.GetSystemLanguage(CancellationToken.None);
+            german.Should().Be(3);
+            PokeRoutineExecutor9SV.SystemLanguageName(german!.Value).Should().Be("German");
+            PokeRoutineExecutor9SV.SystemLanguageName(17).Should().Be("Portuguese (Brazil)");
             bot.Connection.Disconnect();
             fake.Listener.Stop();
         }

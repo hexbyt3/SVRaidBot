@@ -210,6 +210,7 @@ namespace SysBot.Pokemon.SV.BotRaid
 
                 Log("Identifying trainer data of the host console.");
                 _hostSAV = await IdentifyTrainer(token).ConfigureAwait(false);
+                _systemLanguage ??= await GetSystemLanguage(token).ConfigureAwait(false);
                 await InitializeHardware(_settings, token).ConfigureAwait(false);
                 Log("Starting main RotatingRaidBot loop.");
                 await InnerLoop(token).ConfigureAwait(false);
@@ -2975,6 +2976,25 @@ namespace SysBot.Pokemon.SV.BotRaid
             return false;
         }
 
+        // The language the Switch had when the bot started, and whether a rollback has since
+        // changed it. On 10/07 the macro slipped into System > Language and left the console in
+        // German; another run could change anything else in that menu, so rollback stays off
+        // until the host has looked and restarted the program.
+        private int? _systemLanguage;
+        private bool _rollbackOff;
+
+        private async Task CheckRollbackLeftLanguage(CancellationToken token)
+        {
+            if (_systemLanguage is not int before || await GetSystemLanguage(token).ConfigureAwait(false) is not int after || after == before)
+                return;
+
+            _rollbackOff = true;
+            Log($"The time rollback changed the Switch's language from {SystemLanguageName(before)} to {SystemLanguageName(after)}. Time rollback is off until the program is restarted.");
+            EchoUtil.AlertOwner($"The time rollback on the Switch at {Connection.Name} went into the wrong menu and changed its system language " +
+                $"from {SystemLanguageName(before)} to {SystemLanguageName(after)}. Time rollback is off until you restart the program. " +
+                "On the Switch, set System Settings > System > Language back, and check Date and Time and Sleep Mode.");
+        }
+
         /// <summary>
         /// Rolls back the game time by multiple hours
         /// </summary>
@@ -4490,7 +4510,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 return;
             }
             // First, check if the time rollback feature is enabled
-            if (_settings.RaidSettings.EnableTimeRollBack && DateTime.Now - _timeForRollBackCheck >= TimeSpan.FromHours(5))
+            if (_settings.RaidSettings.EnableTimeRollBack && !_rollbackOff && DateTime.Now - _timeForRollBackCheck >= TimeSpan.FromHours(5))
             {
                 Log("Rolling Time back 5 hours.");
                 try
@@ -4505,6 +4525,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                     Log($"Stopped rolling the time back partway: {ex.Message} It will be tried again at the next restart.");
                     await ReturnToGameTile(config, token).ConfigureAwait(false);
                 }
+                await CheckRollbackLeftLanguage(token).ConfigureAwait(false);
             }
 
             var timing = config.Timings;

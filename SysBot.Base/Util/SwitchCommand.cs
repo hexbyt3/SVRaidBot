@@ -273,6 +273,11 @@ namespace SysBot.Base
         public static byte[] GetBotbaseVersion(bool crlf = true) => Encode("getVersion", crlf);
 
         /// <summary>
+        /// Requests the console's system language as a libnx SetLanguage number.
+        /// </summary>
+        public static byte[] GetSystemLanguage(bool crlf = true) => Encode("getSystemLanguage", crlf);
+
+        /// <summary>
         /// Receives requested information about the currently running game application.
         /// </summary>
         /// <param name="info">Valid parameters and their return types: icon (byte[]), version (string), rating (int), author (string), name (string)</param>

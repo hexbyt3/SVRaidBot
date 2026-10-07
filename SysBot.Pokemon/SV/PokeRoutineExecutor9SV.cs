@@ -186,6 +186,35 @@ namespace SysBot.Pokemon.SV
             return title is ScarletID or VioletID;
         }
 
+        private static readonly string[] SystemLanguageNames =
+        [
+            "Japanese", "English (US)", "French", "German", "Italian", "Spanish", "Chinese (Simplified)", "Korean",
+            "Dutch", "Portuguese", "Russian", "Chinese (Traditional)", "English (UK)", "French (Canada)",
+            "Spanish (Latin America)", "Chinese (Simplified)", "Chinese (Traditional)", "Portuguese (Brazil)",
+        ];
+
+        public static string SystemLanguageName(int language) =>
+            (uint)language < SystemLanguageNames.Length ? SystemLanguageNames[language] : $"language {language}";
+
+        /// <summary>
+        /// The console's system language as a libnx SetLanguage number, or null when it can't be read
+        /// (USB connections, or a sys-botbase without the command).
+        /// </summary>
+        public async Task<int?> GetSystemLanguage(CancellationToken token)
+        {
+            if (SwitchConnection is not SwitchSocketAsync)
+                return null;
+            try
+            {
+                var bytes = await SwitchConnection.ReadRaw(SwitchCommand.GetSystemLanguage(), 4, token).ConfigureAwait(false);
+                return int.TryParse(System.Text.Encoding.ASCII.GetString(bytes).Trim('\0', '\n', '\r', ' '), out var language) ? language : null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return null;
+            }
+        }
+
         // Gets from anywhere outside a game (System Settings, a dialog, any row of the HOME
         // menu) to the first software tile, which is the game played last.
         public async Task ReturnToGameTile(PokeRaidHubConfig config, CancellationToken token)
