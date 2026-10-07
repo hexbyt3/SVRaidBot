@@ -32,6 +32,12 @@ namespace SysBot.Base
             [TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(5)];
         private int _failuresInARow;
         private DateTime _lastFailure;
+        private const int AlertAfterCrashes = 3;
+        private const int AlertEveryCrashes = 12;
+
+        // The third crash in a row, then about once an hour while the five-minute restarts go on.
+        public static bool ShouldAlertOwner(int crashesInARow) =>
+            crashesInARow >= AlertAfterCrashes && (crashesInARow - AlertAfterCrashes) % AlertEveryCrashes == 0;
 
         public void Stop()
         {
@@ -199,6 +205,15 @@ namespace SysBot.Base
             var wait = RestartDelays[Math.Min(_failuresInARow, RestartDelays.Length - 1)];
             _failuresInARow++;
             LogUtil.LogInfo($"Restarting in {wait.TotalSeconds:0} seconds (crash {_failuresInARow} in a row).", ident);
+
+            // Restarting fixes a dropped connection, but not a Switch that is asleep or sitting
+            // on the HOME menu. On 10/07 one crashed 30 times over three hours before anyone looked.
+            if (ShouldAlertOwner(_failuresInARow))
+            {
+                var reason = ae.InnerExceptions.Count > 0 ? ae.InnerExceptions[0].Message.Trim() : ae.Message;
+                EchoUtil.AlertOwner($"The raid bot for the Switch at {ident} has crashed {_failuresInARow} times in a row ({reason}). " +
+                    "It keeps retrying on its own, but if this continues, check the Switch: is it asleep, on the HOME menu, or showing an error?");
+            }
             return wait;
         }
 

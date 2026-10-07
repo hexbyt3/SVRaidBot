@@ -256,8 +256,9 @@ namespace SysBot.Base
 
         public async Task<string> GetTitleID(CancellationToken token)
         {
+            // With no game running the reply is a bare newline, which leaves the buffer's zeros behind it.
             var bytes = await ReadRaw(SwitchCommand.GetTitleID(), 17, token).ConfigureAwait(false);
-            return Encoding.ASCII.GetString(bytes).Trim();
+            return Encoding.ASCII.GetString(bytes).Trim('\0', '\n', '\r', ' ');
         }
 
         public async Task<string> GetBotbaseVersion(CancellationToken token)

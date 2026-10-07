@@ -2,6 +2,7 @@ using FluentAssertions;
 using SysBot.Base;
 using SysBot.Pokemon;
 using System;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -100,6 +101,14 @@ namespace SysBot.Tests
             source.Stop();
             await WaitFor(() => !source.IsRunning);
             listener.Stop();
+        }
+
+        // 10/07: 30 crashes over three hours and nobody was told.
+        [Fact]
+        public void OwnerHearsAboutACrashLoop()
+        {
+            var alerted = Enumerable.Range(1, 30).Where(BotSource<PokeBotState>.ShouldAlertOwner).ToArray();
+            alerted.Should().Equal(3, 15, 27);
         }
     }
 }

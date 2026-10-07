@@ -183,6 +183,9 @@ namespace SysBot.Pokemon.Discord
             Manager.Owner = app.Owner.Id;
             App = app;
 
+            EchoUtil.OwnerForwarders.Clear();
+            EchoUtil.OwnerForwarders.Add(msg => app.Owner.SendMessageAsync(msg));
+
             // Start the connection status check
             _ = CheckConnectionStatus(token);
 

@@ -10,6 +10,30 @@ namespace SysBot.Base
         public static readonly SyncList<Action<string>> Forwarders = new();
         public static readonly SyncList<Action<string, Embed>> EmbedForwarders = new();
         public static readonly SyncList<Func<byte[], string, EmbedBuilder, Task<IUserMessage>>> RaidForwarders = new();
+        public static readonly SyncList<Func<string, Task>> OwnerForwarders = new();
+
+        /// <summary>
+        /// Tells the bot's owner about a problem only someone at the console can fix.
+        /// Raid channels never see these.
+        /// </summary>
+        public static void AlertOwner(string message)
+        {
+            foreach (var fwd in OwnerForwarders)
+                _ = SendAlert(fwd, message);
+            LogUtil.LogInfo(message, "Alert");
+        }
+
+        private static async Task SendAlert(Func<string, Task> fwd, string message)
+        {
+            try
+            {
+                await fwd(message).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogInfo($"Could not alert the owner: {ex.Message}", "Alert");
+            }
+        }
 
         public static void Echo(string message)
         {

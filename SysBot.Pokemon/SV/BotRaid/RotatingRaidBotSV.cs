@@ -199,6 +199,15 @@ namespace SysBot.Pokemon.SV.BotRaid
             ExceptionDispatchInfo? failure = null;
             try
             {
+                // A crash restart used to stop here with "is not a valid SV title" every time
+                // the game was not running, and never got it running again.
+                if (!await IsGameRunning(token).ConfigureAwait(false))
+                {
+                    Log("The game is not running. Starting it from the HOME menu.");
+                    await ReturnToGameTile(_hub.Config, token).ConfigureAwait(false);
+                    await StartGame(_hub.Config, token).ConfigureAwait(false);
+                }
+
                 Log("Identifying trainer data of the host console.");
                 _hostSAV = await IdentifyTrainer(token).ConfigureAwait(false);
                 await InitializeHardware(_settings, token).ConfigureAwait(false);
@@ -2972,48 +2981,48 @@ namespace SysBot.Pokemon.SV.BotRaid
         private async Task RollBackTime(CancellationToken token)
         {
             for (int i = 0; i < 2; i++)
-                await Click(B, 0_150, token).ConfigureAwait(false);
+                await ClickConfirmed(B, 0_150, token).ConfigureAwait(false);
 
             for (int i = 0; i < 2; i++)
-                await Click(DRIGHT, 0_150, token).ConfigureAwait(false);
+                await ClickConfirmed(DRIGHT, 0_150, token).ConfigureAwait(false);
 
-            await Click(DDOWN, 0_150, token).ConfigureAwait(false);
-            await Click(DRIGHT, 0_150, token).ConfigureAwait(false);
-            await Click(DRIGHT, 0_150, token).ConfigureAwait(false);
-            await Click(A, 1_250, token).ConfigureAwait(false); // Enter settings
+            await ClickConfirmed(DDOWN, 0_150, token).ConfigureAwait(false);
+            await ClickConfirmed(DRIGHT, 0_150, token).ConfigureAwait(false);
+            await ClickConfirmed(DRIGHT, 0_150, token).ConfigureAwait(false);
+            await ClickConfirmed(A, 1_250, token).ConfigureAwait(false); // Enter settings
 
-            await PressAndHold(DDOWN, 2_000, 0_250, token).ConfigureAwait(false); // Scroll to system settings
-            await Click(A, 1_250, token).ConfigureAwait(false);
+            await PressAndHoldConfirmed(DDOWN, 2_000, 0_250, token).ConfigureAwait(false); // Scroll to system settings
+            await ClickConfirmed(A, 1_250, token).ConfigureAwait(false);
 
             if (_settings.MiscSettings.UseOvershoot)
             {
-                await PressAndHold(DDOWN, _settings.MiscSettings.HoldTimeForRollover, 1_000, token).ConfigureAwait(false);
-                await Click(DUP, 0_500, token).ConfigureAwait(false);
+                await PressAndHoldConfirmed(DDOWN, _settings.MiscSettings.HoldTimeForRollover, 1_000, token).ConfigureAwait(false);
+                await ClickConfirmed(DUP, 0_500, token).ConfigureAwait(false);
             }
             else
             {
                 for (int i = 0; i < 39; i++)
-                    await Click(DDOWN, 0_100, token).ConfigureAwait(false);
+                    await ClickConfirmed(DDOWN, 0_100, token).ConfigureAwait(false);
             }
 
-            await Click(A, 1_250, token).ConfigureAwait(false);
+            await ClickConfirmed(A, 1_250, token).ConfigureAwait(false);
 
             for (int i = 0; i < 2; i++)
-                await Click(DDOWN, 0_150, token).ConfigureAwait(false);
+                await ClickConfirmed(DDOWN, 0_150, token).ConfigureAwait(false);
 
-            await Click(A, 0_500, token).ConfigureAwait(false);
+            await ClickConfirmed(A, 0_500, token).ConfigureAwait(false);
 
             for (int i = 0; i < 3; i++) // Navigate to the hour setting
-                await Click(DRIGHT, 0_200, token).ConfigureAwait(false);
+                await ClickConfirmed(DRIGHT, 0_200, token).ConfigureAwait(false);
 
             for (int i = 0; i < 5; i++) // Roll back the hour by 5
-                await Click(DDOWN, 0_200, token).ConfigureAwait(false);
+                await ClickConfirmed(DDOWN, 0_200, token).ConfigureAwait(false);
 
             for (int i = 0; i < 8; i++) // Mash DRIGHT to confirm
-                await Click(DRIGHT, 0_200, token).ConfigureAwait(false);
+                await ClickConfirmed(DRIGHT, 0_200, token).ConfigureAwait(false);
 
-            await Click(A, 0_200, token).ConfigureAwait(false); // Confirm date/time change
-            await Click(HOME, 1_000, token).ConfigureAwait(false); // Back to title screen
+            await ClickConfirmed(A, 0_200, token).ConfigureAwait(false); // Confirm date/time change
+            await ClickConfirmed(HOME, 1_000, token).ConfigureAwait(false); // Back to title screen
         }
 
         /// <summary>
@@ -4484,9 +4493,18 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             if (_settings.RaidSettings.EnableTimeRollBack && DateTime.Now - _timeForRollBackCheck >= TimeSpan.FromHours(5))
             {
                 Log("Rolling Time back 5 hours.");
-                await RollBackTime(token).ConfigureAwait(false);
-                await Click(A, 1_500, token).ConfigureAwait(false);
-                _timeForRollBackCheck = DateTime.Now;
+                try
+                {
+                    await RollBackTime(token).ConfigureAwait(false);
+                    await Click(A, 1_500, token).ConfigureAwait(false);
+                    _timeForRollBackCheck = DateTime.Now;
+                }
+                catch (PressNotConfirmedException ex)
+                {
+                    // The rest of the macro would have pressed buttons in whatever menu it is in now.
+                    Log($"Stopped rolling the time back partway: {ex.Message} It will be tried again at the next restart.");
+                    await ReturnToGameTile(config, token).ConfigureAwait(false);
+                }
             }
 
             var timing = config.Timings;
@@ -4521,6 +4539,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             Log("Restarting the game!");
 
             await Task.Delay(19_000 + timing.RestartGameSettings.ExtraTimeLoadGame, token).ConfigureAwait(false);
+            await EnsureGameStarted(config, token).ConfigureAwait(false);
             await InitializeRaidBlockPointers(token);
 
             if (!NoActiveRaids)

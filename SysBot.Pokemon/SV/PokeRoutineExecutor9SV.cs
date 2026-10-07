@@ -46,6 +46,8 @@ namespace SysBot.Pokemon.SV
 
             // Check title so we can warn if mode is incorrect.
             string title = await SwitchConnection.GetTitleID(token).ConfigureAwait(false);
+            if (title.Length == 0 || title.All(c => c == '0'))
+                throw new Exception("No game is running on the Switch. Start Scarlet or Violet, then start the bot.");
             if (title is not (ScarletID or VioletID))
             {
                 throw new Exception($"{title} is not a valid SV title. Is your mode correct?");
@@ -141,9 +143,8 @@ namespace SysBot.Pokemon.SV
             Log("Closed out of the game!");
         }
 
-        public async Task StartGame(PokeRaidHubConfig config, CancellationToken token)
+        private async Task PressStartSoftware(TimingSettings timing, CancellationToken token)
         {
-            TimingSettings timing = config.Timings;
             int loadPro = timing.RestartGameSettings.ProfileSelectSettings.ProfileSelectionRequired ? timing.RestartGameSettings.ProfileSelectSettings.ExtraTimeLoadProfile : 0;
 
             // Menus here can go in the order: System Update Prompt -> Profile -> Checking if Game can be played (Digital Only) -> DLC check -> Unable to use DLC
@@ -176,11 +177,56 @@ namespace SysBot.Pokemon.SV
                 await Click(DUP, 0_600, token).ConfigureAwait(false);
                 await Click(A, 0_600, token).ConfigureAwait(false);
             }
+        }
+
+        public async Task<bool> IsGameRunning(CancellationToken token)
+        {
+            // sys-botbase answers a bare newline when no game is running at all.
+            var title = await SwitchConnection.GetTitleID(token).ConfigureAwait(false);
+            return title is ScarletID or VioletID;
+        }
+
+        // Gets from anywhere outside a game (System Settings, a dialog, any row of the HOME
+        // menu) to the first software tile, which is the game played last.
+        public async Task ReturnToGameTile(PokeRaidHubConfig config, CancellationToken token)
+        {
+            await ClickConfirmed(B, 0_500, token).ConfigureAwait(false);
+            await ClickConfirmed(HOME, 2_000 + config.Timings.ExtraTimeReturnHome, token).ConfigureAwait(false);
+            // Down twice reaches the bottom row from the user icons or the software row; up is then the software row.
+            await ClickConfirmed(DDOWN, 0_400, token).ConfigureAwait(false);
+            await ClickConfirmed(DDOWN, 0_400, token).ConfigureAwait(false);
+            await ClickConfirmed(DUP, 0_400, token).ConfigureAwait(false);
+            for (int i = 0; i < 15; i++)
+                await ClickConfirmed(DLEFT, 0_150, token).ConfigureAwait(false);
+        }
+
+        // Start presses that land on the wrong HOME menu tile, or in System Settings after a
+        // menu macro slipped, open something else and no game ever loads. The raid loop then
+        // read empty memory for an hour and crash-looped for three more (10/07).
+        public async Task EnsureGameStarted(PokeRaidHubConfig config, CancellationToken token)
+        {
+            if (await IsGameRunning(token).ConfigureAwait(false))
+                return;
+
+            Log("The game did not start. Going back to the HOME menu to start it again.");
+            await ReturnToGameTile(config, token).ConfigureAwait(false);
+            await PressStartSoftware(config.Timings, token).ConfigureAwait(false);
+            await Task.Delay(15_000 + config.Timings.RestartGameSettings.ExtraTimeLoadGame, token).ConfigureAwait(false);
+            if (!await IsGameRunning(token).ConfigureAwait(false))
+                throw new InvalidOperationException("The game would not start from the HOME menu.");
+            Log("The game is running again.");
+        }
+
+        public async Task StartGame(PokeRaidHubConfig config, CancellationToken token)
+        {
+            TimingSettings timing = config.Timings;
+            await PressStartSoftware(timing, token).ConfigureAwait(false);
 
             Log("Restarting the game!");
 
             // Switch Logo and game load screen
             await Task.Delay(15_000 + timing.RestartGameSettings.ExtraTimeLoadGame, token).ConfigureAwait(false);
+            await EnsureGameStarted(config, token).ConfigureAwait(false);
 
             for (int i = 0; i < 8; i++)
             {
