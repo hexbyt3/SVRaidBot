@@ -17,17 +17,11 @@ namespace SysBot.Pokemon.Discord
         private const string detail = "I am an Open Source RaidBot powered by PKHeX.Core and other open-source software.";
         public const string version = SVRaidBot.Version;
         private const string support = SVRaidBot.Repo;
-        private const ulong DisallowedUserId = 195756980873199618;
 
         [Command("info")]
         [Alias("about", "whoami", "owner")]
         public async Task InfoAsync()
         {
-            if (Context.User.Id == DisallowedUserId)
-            {
-                await ReplyAsync("We don't let shady people use this command.").ConfigureAwait(false);
-                return;
-            }
             var app = await Context.Client.GetApplicationInfoAsync().ConfigureAwait(false);
             var programIconUrl = "https://raw.githubusercontent.com/hexbyt3/sprites/main/imgs/icon4.png";
             var builder = new EmbedBuilder
