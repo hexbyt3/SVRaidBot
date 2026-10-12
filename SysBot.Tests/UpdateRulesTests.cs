@@ -31,6 +31,15 @@ namespace SysBot.Tests
         }
 
         [Fact]
+        public void OnlyANewerReleaseIsAnUpdate()
+        {
+            UpdateRules.IsNewer("v8.10.0", "v8.9.6").Should().BeTrue();
+            UpdateRules.IsNewer("v8.9.6", "v8.10.0").Should().BeFalse("a newer build must never be offered the older release");
+            UpdateRules.IsNewer("v8.10.0", "v8.10.0").Should().BeFalse();
+            UpdateRules.IsNewer(null, "v8.10.0").Should().BeFalse();
+        }
+
+        [Fact]
         public void VersionsCompareAsNumbers()
         {
             UpdateRules.IsRequired([Release("v8.10.0", true)], "v8.9.9").Should().BeTrue();

@@ -27,7 +27,7 @@ namespace SysBot.Pokemon.WinForms
                 return (false, false, string.Empty);
             }
 
-            bool updateAvailable = latestRelease.TagName != SVRaidBot.Version;
+            bool updateAvailable = UpdateRules.IsNewer(latestRelease.TagName, SVRaidBot.Version);
             bool updateRequired = updateAvailable && UpdateRules.IsRequired(await FetchReleasesAsync(), SVRaidBot.Version);
             string? newVersion = latestRelease.TagName;
 
