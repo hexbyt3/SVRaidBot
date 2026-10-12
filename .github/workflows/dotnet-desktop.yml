@@ -14,7 +14,7 @@ jobs:
       version_changed: ${{ steps.compare_versions.outputs.version_changed }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Read Current Version
         id: read_version
         run: |
@@ -45,15 +45,15 @@ jobs:
       Project_Name: SysBot.Pokemon.WinForms/SysBot.Pokemon.WinForms.csproj
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Install .NET Core
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       - name: Setup MSBuild.exe
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
       - name: Restore dependencies
         run: dotnet restore ${{ env.Project_Name }} --runtime win-x64
       - name: Build
@@ -63,7 +63,7 @@ jobs:
       - name: Publish
         run: dotnet publish ${{ env.Project_Name }} --configuration Release --output ./publish /p:PublishSingleFile=true /p:SelfContained=true /p:EnableCompressionInSingleFile=true /p:RuntimeIdentifier=win-x64
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SVRaidBot
           path: ./publish
@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Read Current Version
@@ -97,33 +97,21 @@ jobs:
           echo "$RECENT_CHANGES" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: SVRaidBot
           path: ./publish
       - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        uses: softprops/action-gh-release@v3
         with:
+          token: ${{ secrets.PAT_TOKEN }}
           tag_name: ${{ env.CURRENT_VERSION }}
-          release_name: Release ${{ env.CURRENT_VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: Release ${{ env.CURRENT_VERSION }}
           body: |
             ## Recent Changes
             ${{ env.RECENT_CHANGES }}
-          draft: false
-          prerelease: false
-      - name: Upload Release Asset
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./publish/SVRaidBot.exe
-          asset_name: SVRaidBot.exe
-          asset_content_type: application/octet-stream
+          files: ./publish/SVRaidBot.exe
       - name: Update Last Known Version
         if: success()
         env:

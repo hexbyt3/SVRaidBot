@@ -34,8 +34,6 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.17.1" />
-    <PackageReference Include="MySql.Data" Version="9.2.0" />
-    <PackageReference Include="System.Management" Version="9.0.4" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\SysBot.Base\SysBot.Base.csproj" />
