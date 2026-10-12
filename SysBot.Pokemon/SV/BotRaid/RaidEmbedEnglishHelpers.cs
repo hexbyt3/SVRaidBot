@@ -1,15 +1,9 @@
-﻿using PKHeX.Core;
-
-namespace SysBot.Pokemon.SV.BotRaid;
+﻿namespace SysBot.Pokemon.SV.BotRaid;
 
 internal static class RaidEmbedEnglishHelpers
 {
     public static string RaidEmbedTitle = string.Empty;
-    public static Species RaidSpecies = Species.None;
-    public static byte RaidSpeciesForm = 0;
     public static string RaidSpeciesGender = string.Empty;
-    public static int RaidLevel = 0;
-    public static string RaidSpeciesIVs = string.Empty;
     public static string RaidSpeciesAbility = string.Empty;
     public static string RaidSpeciesNature = string.Empty;
     public static string RaidSpeciesTeraType = string.Empty;
@@ -17,6 +11,4 @@ internal static class RaidEmbedEnglishHelpers
     public static string ExtraMoves = string.Empty;
     public static string ScaleText = string.Empty;
     public static string SpecialRewards = string.Empty;
-    public static int ScaleNumber = 0;
-    public static bool IsShiny = false;
 }
