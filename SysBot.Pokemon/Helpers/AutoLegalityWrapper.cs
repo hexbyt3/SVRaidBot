@@ -66,7 +66,7 @@ namespace SysBot.Pokemon
 
             for (int i = 1; i < Latest.Generation + 1; i++)
             {
-                var versions = GameUtil.GetVersionsInGeneration((byte)i, (GameVersion)Latest.Generation);
+                var versions = GameUtil.GameVersions.Where(z => z.Generation == i);
                 foreach (var v in versions)
                 {
                     var gameVersion = v;

@@ -2694,7 +2694,9 @@ namespace SysBot.Pokemon.SV.BotRaid
                 Log("Could not find Box 1; keeping the current party.");
                 return false;
             }
-            await SwitchConnection.WriteBytesAbsoluteAsync(pk.EncryptedBoxData, offset, token).ConfigureAwait(false);
+            var boxData = new byte[pk.SIZE_STORED];
+            pk.WriteEncryptedDataStored(boxData);
+            await SwitchConnection.WriteBytesAbsoluteAsync(boxData, offset, token).ConfigureAwait(false);
             return true;
         }
 

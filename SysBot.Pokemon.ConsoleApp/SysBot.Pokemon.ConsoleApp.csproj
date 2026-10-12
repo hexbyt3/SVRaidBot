@@ -4,8 +4,8 @@
     <Platforms>x64</Platforms>
     <StartupObject>SysBot.Pokemon.ConsoleApp.Program</StartupObject>
     <Configurations>Debug;Release;sysbottest</Configurations>
-    <TargetFramework>net9.0</TargetFramework>
-	  <LangVersion>13</LangVersion>
+    <TargetFramework>net10.0</TargetFramework>
+	  <LangVersion>14</LangVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.15.3" />

@@ -1,13 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <UseWindowsForms>true</UseWindowsForms>
     <PackageId>SysBot.Pokemon.WinForms</PackageId>
     <Company>Project Pokémon</Company>
     <Authors>Kaphotics, Gengar</Authors>
-	  <LangVersion>13</LangVersion>
+	  <LangVersion>14</LangVersion>
     <Product>SysBot.Pokemon.WinForms</Product>
     <Description>Nintendo Switch Pokémon Bot Manager</Description>
     <ApplicationIcon>icon.ico</ApplicationIcon>
@@ -33,7 +33,6 @@
     <PackageReference Include="Discord.Net" Version="3.17.1" />
     <PackageReference Include="MySql.Data" Version="9.2.0" />
     <PackageReference Include="System.Management" Version="9.0.4" />
-    <PackageReference Include="System.Resources.Extensions" Version="9.0.4" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\SysBot.Base\SysBot.Base.csproj" />
