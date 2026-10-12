@@ -61,7 +61,7 @@ jobs:
       - name: Test
         run: dotnet test SysBot.Tests/SysBot.Tests.csproj --configuration Release
       - name: Publish
-        run: dotnet publish ${{ env.Project_Name }} --configuration Release --output ./publish /p:PublishSingleFile=true /p:SelfContained=false /p:RuntimeIdentifier=win-x64
+        run: dotnet publish ${{ env.Project_Name }} --configuration Release --output ./publish /p:PublishSingleFile=true /p:SelfContained=true /p:EnableCompressionInSingleFile=true /p:RuntimeIdentifier=win-x64
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
