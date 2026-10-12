@@ -106,7 +106,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         private ulong _raidBlockPointerP;
         private ulong _raidBlockPointerK;
         private ulong _raidBlockPointerB;
-        private RaidMemoryManager _raidMemoryManager;
+        private RaidMemoryManager _raidMemoryManager = null!; // created in the bot's setup before any raid work
         private readonly ulong[] _teraNIDOffsets = new ulong[3];
         private string _teraRaidCode = string.Empty;
 
@@ -1273,7 +1273,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 Color = Color.Red,
                 ThumbnailUrl = "https://raw.githubusercontent.com/hexbyt3/sprites/main/imgs/x.png"
             };
-            EchoUtil.RaidEmbed(null, "", embed);
+            _ = EchoUtil.RaidEmbed(null, "", embed);
 
             // A reboot used to run HardStop, which emptied the whole queue: every
             // Discord and GenPKM request and the mystery raids. Only a GenPKM raid
@@ -5180,7 +5180,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         /// </summary>
         private async Task ProcessAllRaids(CancellationToken token)
         {
-            var allRaids = Container.Raids;
+            var allRaids = Container!.Raids;
             var allEncounters = Container.Encounters;
             var allRewards = Container.Rewards;
 
@@ -5261,7 +5261,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
 
                         if (isDistributionRaid)
                         {
-                            var distRaid = Container.DistTeraRaids.FirstOrDefault(d => d.Species == encounter1.Species && d.Form == encounter1.Form);
+                            var distRaid = Container.DistTeraRaids!.FirstOrDefault(d => d.Species == encounter1.Species && d.Form == encounter1.Form);
                             if (distRaid != null)
                             {
                                 groupID = distRaid.DeliveryGroupID;
@@ -5269,7 +5269,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                         }
                         else if (isMightRaid)
                         {
-                            var mightRaid = Container.MightTeraRaids.FirstOrDefault(m => m.Species == encounter1.Species && m.Form == encounter1.Form);
+                            var mightRaid = Container.MightTeraRaids!.FirstOrDefault(m => m.Species == encounter1.Species && m.Form == encounter1.Form);
                             if (mightRaid != null)
                             {
                                 groupID = mightRaid.DeliveryGroupID;

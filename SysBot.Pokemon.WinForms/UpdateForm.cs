@@ -12,10 +12,10 @@ namespace SysBot.Pokemon.WinForms
 {
     public class UpdateForm : Form
     {
-        private Button buttonDownload;
-        private Label labelUpdateInfo;
+        private Button buttonDownload = null!;
+        private Label labelUpdateInfo = null!;
         private readonly Label labelChangelogTitle = new();
-        private TextBox textBoxChangelog;
+        private TextBox textBoxChangelog = null!;
         private readonly bool isUpdateRequired;
         private readonly bool isUpdateAvailable;
         private readonly string newVersion;
@@ -135,7 +135,7 @@ namespace SysBot.Pokemon.WinForms
             textBoxChangelog.Text = await UpdateChecker.FetchChangelogAsync();
         }
 
-        private async void ButtonDownload_Click(object sender, EventArgs e)
+        private async void ButtonDownload_Click(object? sender, EventArgs e)
         {
             buttonDownload.Enabled = false;
             buttonDownload.Text = "Downloading...";

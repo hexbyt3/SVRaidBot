@@ -18,17 +18,17 @@ namespace SysBot.Pokemon.Discord
     public static class SysCordSettings
     {
         public static DiscordManager Manager { get; internal set; } = default!;
-        public static DiscordSettings? Settings => Manager.Config;
+        public static DiscordSettings Settings => Manager.Config;
         public static PokeRaidHubConfig? HubConfig { get; internal set; } = default!;
     }
 
     public sealed class SysCord<T> where T : PKM, new()
     {
-        public static PokeBotRunner<T>? Runner { get; private set; } = default!;
+        public static PokeBotRunner<T> Runner { get; private set; } = default!;
         public static RestApplication? App { get; private set; } = default!;
 
         public static SysCord<T>? Instance { get; private set; }
-        public static ReactionService? ReactionService { get; private set; }
+        public static ReactionService ReactionService { get; private set; } = default!;
         private readonly DiscordSocketClient _client;
         private readonly DiscordManager Manager;
         public readonly PokeRaidHub<T> Hub;
@@ -158,12 +158,12 @@ namespace SysBot.Pokemon.Discord
                 {
                     await _client.StartAsync();
                     _reconnectAttempts = 0;
-                    Log(new LogMessage(LogSeverity.Info, "Gateway", "Reconnected successfully"));
+                    await Log(new LogMessage(LogSeverity.Info, "Gateway", "Reconnected successfully")).ConfigureAwait(false);
                 }
                 catch (Exception reconnectEx)
                 {
                     _reconnectAttempts++;
-                    Log(new LogMessage(LogSeverity.Error, "Gateway", $"Failed to reconnect: {reconnectEx.Message}"));
+                    await Log(new LogMessage(LogSeverity.Error, "Gateway", $"Failed to reconnect: {reconnectEx.Message}")).ConfigureAwait(false);
                 }
             });
 
@@ -230,19 +230,19 @@ namespace SysBot.Pokemon.Discord
                             if (isActive)
                             {
                                 await message.AddReactionAsync(new Emoji("✅"));
-                                Log(new LogMessage(LogSeverity.Info, "RaidEmbed", $"Added green check reaction to message {messageId} in channel {channelId}"));
+                                await Log(new LogMessage(LogSeverity.Info, "RaidEmbed", $"Added green check reaction to message {messageId} in channel {channelId}")).ConfigureAwait(false);
                             }
                             else
                             {
                                 await message.AddReactionAsync(new Emoji("🚫"));
-                                Log(new LogMessage(LogSeverity.Info, "RaidEmbed", $"Added red X reaction to message {messageId} in channel {channelId}"));
+                                await Log(new LogMessage(LogSeverity.Info, "RaidEmbed", $"Added red X reaction to message {messageId} in channel {channelId}")).ConfigureAwait(false);
                             }
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log(new LogMessage(LogSeverity.Error, "RaidEmbed", $"Error updating reactions: {ex.Message}"));
+                    await Log(new LogMessage(LogSeverity.Error, "RaidEmbed", $"Error updating reactions: {ex.Message}")).ConfigureAwait(false);
                 }
             };
 
@@ -363,12 +363,12 @@ namespace SysBot.Pokemon.Discord
                 catch (Exception ex)
                 {
                     // Just log but don't interrupt - removing the reaction is just for cleanliness
-                    Log(new LogMessage(LogSeverity.Warning, "RaidCode", $"Failed to remove reaction: {ex.Message}"));
+                    await Log(new LogMessage(LogSeverity.Warning, "RaidCode", $"Failed to remove reaction: {ex.Message}")).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
             {
-                Log(new LogMessage(LogSeverity.Error, "RaidCode", $"Failed to send raid code DM: {ex.Message}"));
+                await Log(new LogMessage(LogSeverity.Error, "RaidCode", $"Failed to send raid code DM: {ex.Message}")).ConfigureAwait(false);
             }
         }
 
@@ -469,15 +469,15 @@ namespace SysBot.Pokemon.Discord
             {
                 if (_client.ConnectionState == ConnectionState.Disconnected)
                 {
-                    Log(new LogMessage(LogSeverity.Warning, "Gateway", "Detected disconnected state, attempting to reconnect..."));
+                    await Log(new LogMessage(LogSeverity.Warning, "Gateway", "Detected disconnected state, attempting to reconnect...")).ConfigureAwait(false);
                     try
                     {
                         await _client.StartAsync();
-                        Log(new LogMessage(LogSeverity.Info, "Gateway", "Reconnected successfully"));
+                        await Log(new LogMessage(LogSeverity.Info, "Gateway", "Reconnected successfully")).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
-                        Log(new LogMessage(LogSeverity.Error, "Gateway", $"Failed to reconnect: {ex.Message}"));
+                        await Log(new LogMessage(LogSeverity.Error, "Gateway", $"Failed to reconnect: {ex.Message}")).ConfigureAwait(false);
                     }
                 }
                 await Task.Delay(60000, token); // Check every minute

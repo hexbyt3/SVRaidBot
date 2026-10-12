@@ -293,7 +293,7 @@ namespace SysBot.Pokemon
             public MoveType MoveType { get; set; }
 
             [Description("The Discord emoji string for this move type.")]
-            public string EmojiCode { get; set; }
+            public string? EmojiCode { get; set; }
 
             public MoveTypeEmojiInfo() { }
 

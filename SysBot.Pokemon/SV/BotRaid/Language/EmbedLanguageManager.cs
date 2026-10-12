@@ -8,7 +8,7 @@ namespace SysBot.Pokemon.SV.BotRaid.Language
 {
     public static class EmbedLanguageManager
     {
-        private static JObject _languageData;
+        private static JObject _languageData = new();
 
         static EmbedLanguageManager()
         {
@@ -51,7 +51,7 @@ namespace SysBot.Pokemon.SV.BotRaid.Language
             if (mappings == null || !mappings.HasValues || mappings[languageCode] == null)
                 return mappings?["en"]?.ToString() ?? key;
 
-            return mappings[languageCode].ToString();
+            return mappings[languageCode]!.ToString();
         }
 
         public static string GetStarRating(int stars, LanguageOptions language)
@@ -67,12 +67,12 @@ namespace SysBot.Pokemon.SV.BotRaid.Language
 
             if (starRatings == null || !starRatings.HasValues ||
                 starRatings[stars.ToString()] == null ||
-                starRatings[stars.ToString()][languageCode] == null)
+                starRatings[stars.ToString()]![languageCode] == null)
             {
                 return $"{stars} ★";
             }
 
-            return starRatings[stars.ToString()][languageCode].ToString();
+            return starRatings[stars.ToString()]![languageCode]!.ToString();
         }
 
         private static string GetLanguageCode(LanguageOptions language)

@@ -339,7 +339,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 var config = JObject.Parse(jsonData);
 
                 // Access the IP address from the first bot in the Bots array
-                var ip = config["Bots"][0]["Connection"]["IP"].ToString();
+                var ip = config["Bots"]![0]!["Connection"]!["IP"]!.ToString();
                 return ip;
             }
             catch (Exception ex)
@@ -544,7 +544,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             if (isUserMention)
             {
                 // Extract the user ID from the mention and retrieve the user
-                var userId2 = ulong.Parse(Regex.Match(speciesNameOrUserMention, @"\d+").Value);
+                var userId2 = ulong.Parse(Regex.Match(speciesNameOrUserMention!, @"\d+").Value);
                 user1 = Context.Guild.GetUser(userId2);
             }
             else
@@ -633,7 +633,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
 
             int raidDeliveryGroupID = -1;
 
-            if (isEvent && SpeciesToGroupIDMap.TryGetValue(speciesName, out var groupIDAndIndices))
+            if (isEvent && SpeciesToGroupIDMap.TryGetValue(speciesName!, out var groupIDAndIndices))
             {
                 var firstRaidGroupID = groupIDAndIndices.First().GroupID;
                 raidDeliveryGroupID = firstRaidGroupID;
@@ -707,7 +707,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 Title = $"{Context.User.Username}'s Requested Raid{(isEvent ? $" ({speciesName} Event Raid)" : "")}",
                 RaidUpNext = false,
                 User = Context.User,
-                MentionedUsers = new List<SocketUser> { user1, user2, user3 }.Where(u => u != null).ToList(),
+                MentionedUsers = new List<SocketUser?> { user1, user2, user3 }.OfType<SocketUser>().ToList(),
             };
 
             // Check if Species is Ditto and set PartyPK to Showdown template

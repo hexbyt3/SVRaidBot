@@ -9,7 +9,7 @@ namespace SysBot.Base
     {
         public static readonly SyncList<Action<string>> Forwarders = new();
         public static readonly SyncList<Action<string, Embed>> EmbedForwarders = new();
-        public static readonly SyncList<Func<byte[], string, EmbedBuilder, Task<IUserMessage>>> RaidForwarders = new();
+        public static readonly SyncList<Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>>> RaidForwarders = new();
         public static readonly SyncList<Func<string, Task>> OwnerForwarders = new();
 
         /// <summary>
@@ -88,7 +88,7 @@ namespace SysBot.Base
             LogUtil.LogInfo(message, "Echo");
         }
 
-        public static async Task<List<IUserMessage>> RaidEmbed(byte[] bytes, string fileName, EmbedBuilder embeds)
+        public static async Task<List<IUserMessage>> RaidEmbed(byte[]? bytes, string fileName, EmbedBuilder embeds)
         {
             List<IUserMessage> sentMessages = new List<IUserMessage>();
             foreach (var fwd in RaidForwarders)

@@ -9,8 +9,6 @@ namespace SysBot.Pokemon
     /// <typeparam name="T">Type of <see cref="PKM"/> to distribute.</typeparam>
     public class PokeRaidHub<T> where T : PKM, new()
     {
-        public RotatingRaidSettingsSV RotatingRaidSV { get; set; }
-
         public PokeRaidHub(PokeRaidHubConfig config)
         {
             Config = config;

@@ -5,7 +5,7 @@ using System.IO;
 
 public class UserRequestManager
 {
-    private Dictionary<ulong, UserRequestInfo> userRequests;
+    private Dictionary<ulong, UserRequestInfo> userRequests = new();
     private readonly string filePath;
 
     public UserRequestManager()

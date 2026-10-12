@@ -26,7 +26,7 @@ namespace SysBot.Tests
                 var buffer = new byte[256];
                 foreach (var chunks in replies)
                 {
-                    await stream.ReadAsync(buffer);
+                    await stream.ReadAtLeastAsync(buffer, 1, throwOnEndOfStream: false);
                     foreach (var chunk in chunks)
                     {
                         await stream.WriteAsync(Encoding.ASCII.GetBytes(chunk));
@@ -118,7 +118,7 @@ namespace SysBot.Tests
                     previous?.Dispose();
                     previous = client;
                     var stream = client.GetStream();
-                    await stream.ReadAsync(buffer);
+                    await stream.ReadAtLeastAsync(buffer, 1, throwOnEndOfStream: false);
                     if (reply != null)
                         await stream.WriteAsync(Encoding.ASCII.GetBytes(reply));
                 }

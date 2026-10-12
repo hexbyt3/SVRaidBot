@@ -21,15 +21,13 @@ namespace SysBot.Pokemon.WinForms
     {
         private readonly List<PokeBotState> Bots = new();
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-        internal ProgramConfig Config { get; set; }
-        private IPokeBotRunner RunningEnvironment { get; set; }
+        internal ProgramConfig Config { get; set; } = null!; // set in InitializeAsync before use
+        private IPokeBotRunner RunningEnvironment { get; set; } = null!; // set in InitializeAsync before use
         public readonly ISwitchConnectionAsync? SwitchConnection;
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public static bool IsUpdating { get; set; } = false;
-        private System.Windows.Forms.Timer _autoSaveTimer;
-        private System.Windows.Forms.Timer _updateCheckTimer;
-        private TcpListener? _tcpListener;
-        private CancellationTokenSource? _cts;
+        private System.Windows.Forms.Timer? _autoSaveTimer;
+        private System.Windows.Forms.Timer? _updateCheckTimer;
         private bool hasUpdate = false;
         private double pulsePhase = 0;
         private Color lastIndicatorColor = Color.Empty;
@@ -121,7 +119,7 @@ namespace SysBot.Pokemon.WinForms
 
             LoadControls();
             Text = $"{(string.IsNullOrEmpty(Config.Hub.BotName) ? "S/V RaidBot" : Config.Hub.BotName)} {SVRaidBot.Version} ({Config.Mode})";
-            trayIcon.Text = (Config?.Hub?.BotName != null && !string.IsNullOrEmpty(Config.Hub.BotName)) ? Config.Hub.BotName : "S/V RaidBot";
+            trayIcon.Text = (Config.Hub.BotName != null && !string.IsNullOrEmpty(Config.Hub.BotName)) ? Config.Hub.BotName : "S/V RaidBot";
             _ = Task.Run(BotMonitor);
             InitUtil.InitializeStubs(Config.Mode);
             // Start periodic update checks
@@ -248,7 +246,7 @@ namespace SysBot.Pokemon.WinForms
             // Delete the port info file
             try
             {
-                string portInfoPath = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), $"SVRaidBot_{Environment.ProcessId}.port");
+                string portInfoPath = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath)!, $"SVRaidBot_{Environment.ProcessId}.port");
                 if (File.Exists(portInfoPath))
                     File.Delete(portInfoPath);
             }

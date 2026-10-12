@@ -203,7 +203,7 @@ namespace SysBot.Pokemon.WinForms
 
             foreach (var tsi in RCMenu.Items.OfType<ToolStripMenuItem>())
             {
-                var text = tsi.Text.Replace("▶ ", "").Replace("■ ", "").Replace("⏸ ", "")
+                var text = tsi.Text!.Replace("▶ ", "").Replace("■ ", "").Replace("⏸ ", "")
                     .Replace("⏵ ", "").Replace("↻ ", "").Replace("⚡ ", "").Replace("🗺 ", "")
                     .Replace("💡 ", "").Replace("🌙 ", "").Replace("✕ ", "");
                 tsi.Enabled = Enum.TryParse(text, out BotControlCommand cmd)
@@ -222,7 +222,7 @@ namespace SysBot.Pokemon.WinForms
 
         public void ReloadStatus()
         {
-            var bot = GetBot().Bot;
+            var bot = GetBot()!.Bot;
             L_Left.Text = $"{bot.Connection.Name}\n{State.InitialRoutine}";
         }
 
@@ -305,7 +305,7 @@ namespace SysBot.Pokemon.WinForms
         {
             var bot = GetBot();
             if (!Runner!.Config.SkipConsoleBotCreation)
-                bot.Stop();
+                bot!.Stop();
             Remove?.Invoke(this, EventArgs.Empty);
         }
 
@@ -439,7 +439,7 @@ namespace SysBot.Pokemon.WinForms
             }
         }
 
-        public BotSource<PokeBotState> GetBot()
+        public BotSource<PokeBotState>? GetBot()
         {
             try
             {
@@ -666,7 +666,7 @@ namespace SysBot.Pokemon.WinForms
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
             var btn = sender as Button;
-            var rect = btn.ClientRectangle;
+            var rect = btn!.ClientRectangle;
             rect.Inflate(-1, -1);
 
             // Draw rounded button

@@ -79,6 +79,9 @@ namespace SysBot.Pokemon
 
         public static async Task<(int R, int G, int B)> GetDominantColorAsync(string imageUrl)
         {
+            if (!OperatingSystem.IsWindowsVersionAtLeast(6, 1))
+                return (255, 255, 255); // System.Drawing bitmaps are Windows-only
+
             try
             {
                 using var response = await httpClient.GetAsync(imageUrl);

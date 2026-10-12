@@ -39,7 +39,7 @@ namespace SysBot.Pokemon.Discord
                 var config = JObject.Parse(jsonData);
 
                 // Access the IP address from the first bot in the Bots array
-                var ip = config["Bots"][0]["Connection"]["IP"].ToString();
+                var ip = config["Bots"]![0]!["Connection"]!["IP"]!.ToString();
                 return ip;
             }
             catch (Exception ex)

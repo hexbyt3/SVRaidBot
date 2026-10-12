@@ -33,17 +33,17 @@ namespace SysBot.Pokemon.Discord
 
     public class EchoModule : ModuleBase<SocketCommandContext>
     {
-        private static DiscordSettings Settings { get; set; }
+        private static DiscordSettings Settings { get; set; } = default!;
 
         private class EchoChannel
         {
             public readonly ulong ChannelID;
             public readonly string ChannelName;
             public readonly Action<string> Action;
-            public readonly Func<byte[], string, EmbedBuilder, Task<IUserMessage>> RaidAction;
+            public readonly Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>> RaidAction;
             public string EmbedResult = string.Empty;
 
-            public EchoChannel(ulong channelId, string channelName, Action<string> action, Func<byte[], string, EmbedBuilder, Task<IUserMessage>> raidAction)
+            public EchoChannel(ulong channelId, string channelName, Action<string> action, Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>> raidAction)
             {
                 ChannelID = channelId;
                 ChannelName = channelName;
@@ -240,7 +240,7 @@ namespace SysBot.Pokemon.Discord
             return false; // Reached max number of retries without success.
         }
 
-        private static async Task<IUserMessage> RaidEmbedAsync(ISocketMessageChannel c, byte[] bytes, string fileName, EmbedBuilder embed, int maxRetries = 2)
+        private static async Task<IUserMessage> RaidEmbedAsync(ISocketMessageChannel c, byte[]? bytes, string fileName, EmbedBuilder embed, int maxRetries = 2)
         {
             int retryCount = 0;
             while (retryCount < maxRetries)
@@ -266,7 +266,7 @@ namespace SysBot.Pokemon.Discord
                         await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false); // Wait for a second before retrying.
                 }
             }
-            return null; // Return null if we couldn't send the message after all retries
+            return null!; // Return null if we couldn't send the message after all retries
         }
 
         private static void AddEchoChannel(ISocketMessageChannel c, ulong cid)
@@ -274,7 +274,7 @@ namespace SysBot.Pokemon.Discord
             Action<string> l = async (msg) => await SendMessageWithRetry(c, msg).ConfigureAwait(false);
 
             // Create a properly typed Func that returns Task<IUserMessage>
-            Func<byte[], string, EmbedBuilder, Task<IUserMessage>> rb = (bytes, fileName, embed) =>
+            Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>> rb = (bytes, fileName, embed) =>
                 RaidEmbedAsync(c, bytes, fileName, embed);
 
             EchoUtil.Forwarders.Add(l);

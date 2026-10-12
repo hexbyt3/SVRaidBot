@@ -1509,7 +1509,6 @@ namespace SysBot.Pokemon.WinForms
         // Also update the AnimationTimer_Tick method to be more efficient:
         private void AnimationTimer_Tick(object sender, EventArgs e)
         {
-            bool needsUpdate = false;
             var controlsToUpdate = new List<Control>();
 
             // Update hover animations only for controls that need it
@@ -1537,7 +1536,6 @@ namespace SysBot.Pokemon.WinForms
                         animState.HoverProgress > 0.001 && animState.HoverProgress < 0.999)
                     {
                         controlsToUpdate.Add(control);
-                        needsUpdate = true;
                     }
                 }
             }
