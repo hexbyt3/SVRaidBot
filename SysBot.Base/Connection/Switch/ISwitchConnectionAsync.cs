@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -15,6 +16,12 @@ public interface ISwitchConnectionAsync : IConsoleConnectionAsync
 
     Task<string> GetTitleID(CancellationToken token);
 
+    /// <summary>
+    /// Asks the console for its title ID and returns how long the answer took, not counting
+    /// time spent waiting for other commands on the connection to finish first.
+    /// </summary>
+    Task<TimeSpan> PingAsync(CancellationToken token);
+
     Task<string> GetBotbaseVersion(CancellationToken token);
 
     Task<string> GetGameInfo(string info, CancellationToken token);
@@ -25,19 +32,11 @@ public interface ISwitchConnectionAsync : IConsoleConnectionAsync
 
     Task<byte[]> ReadBytesAbsoluteAsync(ulong offset, int length, CancellationToken token);
 
-    Task<byte[]> ReadBytesMultiAsync(IReadOnlyDictionary<ulong, int> offsetSize, CancellationToken token);
-
-    Task<byte[]> ReadBytesAbsoluteMultiAsync(IReadOnlyDictionary<ulong, int> offsetSize, CancellationToken token);
-
-    Task<byte[]> ReadBytesMainMultiAsync(IReadOnlyDictionary<ulong, int> offsetSize, CancellationToken token);
-
     Task WriteBytesMainAsync(byte[] data, ulong offset, CancellationToken token);
 
     Task WriteBytesAbsoluteAsync(byte[] data, ulong offset, CancellationToken token);
 
     Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token);
-
-    Task SendRaw(byte[] command, CancellationToken token);
 
     Task<byte[]> PointerPeek(int size, IEnumerable<long> jumps, CancellationToken token);
 
@@ -45,5 +44,4 @@ public interface ISwitchConnectionAsync : IConsoleConnectionAsync
 
     Task<ulong> PointerAll(IEnumerable<long> jumps, CancellationToken token);
 
-    Task<ulong> PointerRelative(IEnumerable<long> jumps, CancellationToken token);
 }

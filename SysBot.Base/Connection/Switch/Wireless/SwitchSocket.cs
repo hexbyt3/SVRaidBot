@@ -1,4 +1,6 @@
 ﻿using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SysBot.Base
 {
@@ -35,7 +37,7 @@ namespace SysBot.Base
 
         public void LogError(string message) => LogUtil.LogError(message, Label);
 
-        public abstract void Connect();
+        public abstract Task ConnectAsync(CancellationToken token);
 
         public abstract void Reset();
 

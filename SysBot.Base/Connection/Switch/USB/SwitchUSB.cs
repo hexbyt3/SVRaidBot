@@ -1,10 +1,11 @@
 ﻿using LibUsbDotNet;
 using LibUsbDotNet.Main;
 using System;
+using System.Diagnostics;
 using System.IO;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace SysBot.Base
 {
@@ -47,7 +48,9 @@ namespace SysBot.Base
             Connect();
         }
 
-        public void Connect()
+        public Task ConnectAsync(CancellationToken token) => Task.Run(Connect, token);
+
+        private void Connect()
         {
             SwDevice = TryFindUSB();
             if (SwDevice == null)
@@ -74,6 +77,7 @@ namespace SysBot.Base
 
                 reader = SwDevice.OpenEndpointReader(ReadEndpointID.Ep01);
                 writer = SwDevice.OpenEndpointWriter(WriteEndpointID.Ep01);
+                Connected = true;
             }
         }
 
@@ -115,6 +119,10 @@ namespace SysBot.Base
 
                 reader?.Dispose();
                 writer?.Dispose();
+                reader = null;
+                writer = null;
+                SwDevice = null;
+                Connected = false;
             }
         }
 
@@ -122,12 +130,6 @@ namespace SysBot.Base
         {
             lock (_sync)
                 return SendInternal(buffer);
-        }
-
-        public int Read(byte[] buffer)
-        {
-            lock (_sync)
-                return ReadInternal(buffer);
         }
 
         // One command and its reply at a time: two callers that both send before
@@ -138,6 +140,16 @@ namespace SysBot.Base
             {
                 SendInternal(command);
                 return ReadBulkUSB();
+            }
+        }
+
+        protected TimeSpan TimeExchange(byte[] command)
+        {
+            lock (_sync)
+            {
+                var answered = Stopwatch.StartNew();
+                Exchange(command);
+                return answered.Elapsed;
             }
         }
 
@@ -152,7 +164,11 @@ namespace SysBot.Base
 
         protected byte[] Read(ulong offset, int length, Func<ulong, int, byte[]> method) => Exchange(method(offset, length));
 
-        protected byte[] ReadMulti(IReadOnlyDictionary<ulong, int> offsetSizes, Func<IReadOnlyDictionary<ulong, int>, byte[]> method) => Exchange(method(offsetSizes));
+        // The biggest real replies are screenshots and event data, a few hundred KB at most.
+        // A length past this is a garbled header, not something to allocate.
+        public const int MaxReplySize = 16 * 1024 * 1024;
+
+        public static bool IsPlausibleReplySize(int size) => size is >= 0 and <= MaxReplySize;
 
         private int ReadReplySize()
         {
@@ -163,7 +179,13 @@ namespace SysBot.Base
                 Disconnect();
                 throw new IOException($"The console did not say how long its reply is ({ec}).");
             }
-            return BitConverter.ToInt32(sizeOfReturn, 0);
+            int size = BitConverter.ToInt32(sizeOfReturn, 0);
+            if (!IsPlausibleReplySize(size))
+            {
+                Disconnect();
+                throw new IOException($"The console announced a {size}-byte reply, which can't be right.");
+            }
+            return size;
         }
 
         protected byte[] ReadBulkUSB()
@@ -176,22 +198,21 @@ namespace SysBot.Base
                 if (reader == null)
                     throw new Exception("USB device not found or not connected.");
 
-                // Let usb-botbase tell us the response size.
+                // usb-botbase sends the reply's length first, then the reply.
                 int size = ReadReplySize();
                 byte[] buffer = new byte[size];
-
-                // Loop until we have read everything.
-                int transfSize = 0;
-                while (transfSize < size)
+                int read = 0;
+                while (read < size)
                 {
                     Thread.Sleep(1);
-                    var ec = reader.Read(buffer, transfSize, Math.Min(reader.ReadBufferSize, size - transfSize), 5000, out int lenVal);
-                    if (ec != ErrorCode.None)
+                    var ec = reader.Read(buffer, read, Math.Min(reader.ReadBufferSize, size - read), 5000, out int got);
+                    // A read that reports no error but no bytes either would otherwise spin here forever.
+                    if (ec != ErrorCode.None || got <= 0)
                     {
                         Disconnect();
-                        throw new Exception(UsbDevice.LastErrorString);
+                        throw new IOException($"The console stopped partway through its reply ({read} of {size} bytes, {ec}).");
                     }
-                    transfSize += lenVal;
+                    read += got;
                 }
                 return buffer;
             }
@@ -199,12 +220,20 @@ namespace SysBot.Base
 
         protected void Write(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
         {
-            if (data.Length > MaximumTransferSize)
-                WriteLarge(data, offset, method);
-            else WriteSmall(data, offset, method);
+            if (data.Length <= MaximumTransferSize)
+            {
+                WriteSmall(data, offset, method);
+                return;
+            }
+            foreach (var chunk in data.Chunk(MaximumTransferSize))
+            {
+                WriteSmall(chunk, offset, method);
+                offset += (ulong)chunk.Length;
+                Thread.Sleep((MaximumTransferSize / DelayFactor) + BaseDelay);
+            }
         }
 
-        public void WriteSmall(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
+        private void WriteSmall(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
         {
             lock (_sync)
             {
@@ -212,17 +241,6 @@ namespace SysBot.Base
                 SendInternal(cmd);
                 Thread.Sleep(1);
             }
-        }
-
-        private int ReadInternal(byte[] buffer)
-        {
-            byte[] sizeOfReturn = new byte[4];
-            if (reader == null)
-                throw new Exception("USB device not found or not connected.");
-
-            reader.Read(sizeOfReturn, 5000, out _);
-            reader.Read(buffer, 5000, out var lenVal);
-            return lenVal;
         }
 
         private int SendInternal(byte[] buffer)
@@ -246,41 +264,17 @@ namespace SysBot.Base
             return l;
         }
 
-        private void WriteLarge(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
-        {
-            int byteCount = data.Length;
-            for (int i = 0; i < byteCount; i += MaximumTransferSize)
-            {
-                var slice = data.SliceSafe(i, MaximumTransferSize);
-                Write(slice, offset + (uint)i, method);
-                Thread.Sleep((MaximumTransferSize / DelayFactor) + BaseDelay);
-            }
-        }
-
+        // A missed screenshot only costs the embed its picture; a half-read one would show as a broken image.
         protected byte[] PixelPeekUSB()
         {
-            Thread.Sleep(1);
-            lock (_sync)
+            try
             {
-                if (reader == null)
-                    throw new Exception("USB device not found or not connected.");
-
-                int size = ReadReplySize();
-                byte[] buffer = new byte[size];
-                int transfSize = 0;
-                while (transfSize < size)
-                {
-                    Thread.Sleep(1);
-                    var ec = reader.Read(buffer, transfSize, Math.Min(reader.ReadBufferSize, size - transfSize), 5000, out int lenVal);
-                    if (ec != ErrorCode.None)
-                    {
-                        LogError($"Error while getting screenshot: {UsbDevice.LastErrorString}");
-                        Disconnect();
-                        break;
-                    }
-                    transfSize += lenVal;
-                }
-                return buffer;
+                return ReadBulkUSB();
+            }
+            catch (IOException ex)
+            {
+                LogError($"Could not read the screenshot: {ex.Message}");
+                return [];
             }
         }
     }

@@ -20,15 +20,8 @@
     /// <summary>
     /// Exposes methods to obtain the communication object that interacts with the console.
     /// </summary>
-    /// <typeparam name="TSync"></typeparam>
-    /// <typeparam name="TAsync"></typeparam>
-    public interface IConsoleBotConnector<out TSync, out TAsync>
+    public interface IConsoleBotConnector<out TAsync>
     {
-        /// <summary>
-        /// Obtains the synchronous communication implementation for this console.
-        /// </summary>
-        TSync CreateSync();
-
         /// <summary>
         /// Obtains the asynchronous communication implementation for this console.
         /// </summary>
@@ -38,7 +31,7 @@
     /// <summary>
     /// Combined interface for less verbosity of implementers
     /// </summary>
-    public interface IConsoleBotManaged<out TSync, out TAsync> : IConsoleBotConfig, IConsoleBotConnector<TSync, TAsync>
+    public interface IConsoleBotManaged<out TAsync> : IConsoleBotConfig, IConsoleBotConnector<TAsync>
     {
         IConsoleBotConfig GetInnerConfig();
     }

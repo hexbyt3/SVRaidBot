@@ -75,7 +75,7 @@ namespace SysBot.Tests
             cfg.Connection.IP = "127.0.0.1";
             cfg.Connection.Port = ((IPEndPoint)listener.LocalEndpoint).Port;
             var bot = new RemoteControlBotSV(cfg);
-            bot.Connection.Connect();
+            await bot.Connection.ConnectAsync(CancellationToken.None);
 
             const uint key = 0xCAFEBABE;
             const ulong baseBlock = 0x1000;

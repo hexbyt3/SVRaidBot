@@ -27,6 +27,7 @@ namespace SysBot.Tests
             public bool GameRunning;
             public bool StartsFromFirstTile = true;
             public int TitleReplyDelay;
+            public int ScreenshotDelay;
             public int Language = 1;
             private int _leftPresses;
 
@@ -63,6 +64,12 @@ namespace SysBot.Tests
                     else if (line == "click A" && StartsFromFirstTile && _leftPresses >= 15)
                         GameRunning = true;
 
+                    if (line == "pixelPeek")
+                    {
+                        await Task.Delay(ScreenshotDelay);
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes("0102\n"));
+                        continue;
+                    }
                     if (line == "getSystemLanguage")
                     {
                         await stream.WriteAsync(Encoding.ASCII.GetBytes(Language + "\n"));
@@ -78,14 +85,14 @@ namespace SysBot.Tests
             }
         }
 
-        private static RemoteControlBotSV Connect(FakeSwitch fake)
+        private static async Task<RemoteControlBotSV> Connect(FakeSwitch fake)
         {
             var cfg = new PokeBotState();
             cfg.Connection.Protocol = SwitchProtocol.WiFi;
             cfg.Connection.IP = "127.0.0.1";
             cfg.Connection.Port = fake.Port;
             var bot = new RemoteControlBotSV(cfg);
-            bot.Connection.Connect();
+            await bot.Connection.ConnectAsync(CancellationToken.None);
             return bot;
         }
 
@@ -101,7 +108,7 @@ namespace SysBot.Tests
         public async Task NoGameRunningReadsAsNotRunning()
         {
             var fake = new FakeSwitch();
-            var bot = Connect(fake);
+            var bot = await Connect(fake);
             (await bot.IsGameRunning(CancellationToken.None)).Should().BeFalse();
             fake.GameRunning = true;
             (await bot.IsGameRunning(CancellationToken.None)).Should().BeTrue();
@@ -115,10 +122,31 @@ namespace SysBot.Tests
         public async Task ConfirmedPressesWaitForTheConsole()
         {
             var fake = new FakeSwitch();
-            var bot = Connect(fake);
+            var bot = await Connect(fake);
             await bot.ClickConfirmed(SwitchButton.B, 0, CancellationToken.None);
             await bot.PressAndHoldConfirmed(SwitchButton.DDOWN, 50, 0, CancellationToken.None);
             fake.Commands.Should().Equal("click B", "getTitleID", "press DDOWN", "getTitleID", "release DDOWN", "getTitleID");
+            bot.Connection.Disconnect();
+            fake.Listener.Stop();
+        }
+
+        // A screenshot for Discord holds the connection for a few seconds. A press
+        // confirmation that waits its turn behind one is not the console being slow.
+        [Fact]
+        public async Task WaitingBehindAScreenshotIsNotCountedAsASlowAnswer()
+        {
+            var fake = new FakeSwitch { ScreenshotDelay = 2_000 };
+            var bot = await Connect(fake);
+            var screenshot = bot.Connection.PixelPeek(CancellationToken.None);
+            var deadline = DateTime.Now.AddSeconds(5);
+            while (!fake.Commands.Contains("pixelPeek") && DateTime.Now < deadline)
+                await Task.Delay(20);
+
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            var answered = await ((ISwitchConnectionAsync)bot.Connection).PingAsync(CancellationToken.None);
+            waited.Elapsed.Should().BeGreaterThan(TimeSpan.FromSeconds(1.5));
+            answered.Should().BeLessThan(SwitchRoutineExecutor<PokeBotState>.PressConfirmLimit);
+            (await screenshot).Should().Equal(1, 2);
             bot.Connection.Disconnect();
             fake.Listener.Stop();
         }
@@ -127,7 +155,7 @@ namespace SysBot.Tests
         public async Task SlowConfirmationStopsTheMacro()
         {
             var fake = new FakeSwitch { TitleReplyDelay = 2_000 };
-            var bot = Connect(fake);
+            var bot = await Connect(fake);
             var press = () => bot.ClickConfirmed(SwitchButton.A, 0, CancellationToken.None);
             await press.Should().ThrowAsync<PressNotConfirmedException>();
             bot.Connection.Disconnect();
@@ -140,7 +168,7 @@ namespace SysBot.Tests
         public async Task GameThatDidNotStartIsStartedFromTheFirstTile()
         {
             var fake = new FakeSwitch();
-            var bot = Connect(fake);
+            var bot = await Connect(fake);
             await bot.EnsureGameStarted(QuickLoadConfig(), CancellationToken.None);
 
             fake.GameRunning.Should().BeTrue();
@@ -157,7 +185,7 @@ namespace SysBot.Tests
         public async Task SystemLanguageIsRead()
         {
             var fake = new FakeSwitch();
-            var bot = Connect(fake);
+            var bot = await Connect(fake);
             (await bot.GetSystemLanguage(CancellationToken.None)).Should().Be(1);
             fake.Language = 3;
             var german = await bot.GetSystemLanguage(CancellationToken.None);
@@ -172,7 +200,7 @@ namespace SysBot.Tests
         public async Task RunningGameIsLeftAlone()
         {
             var fake = new FakeSwitch { GameRunning = true };
-            var bot = Connect(fake);
+            var bot = await Connect(fake);
             await bot.EnsureGameStarted(QuickLoadConfig(), CancellationToken.None);
             fake.Commands.Should().Equal("getTitleID");
             bot.Connection.Disconnect();
@@ -183,7 +211,7 @@ namespace SysBot.Tests
         public async Task GameThatWillNotStartIsReported()
         {
             var fake = new FakeSwitch { StartsFromFirstTile = false };
-            var bot = Connect(fake);
+            var bot = await Connect(fake);
             var start = () => bot.EnsureGameStarted(QuickLoadConfig(), CancellationToken.None);
             await start.Should().ThrowAsync<InvalidOperationException>().WithMessage("*would not start*");
             bot.Connection.Disconnect();

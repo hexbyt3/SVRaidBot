@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
@@ -8,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using static SysBot.Base.SwitchOffsetType;
+using static System.Buffers.Binary.BinaryPrimitives;
 
 namespace SysBot.Base
 {
@@ -28,71 +30,81 @@ namespace SysBot.Base
             return new SwitchSocketAsync(cfg);
         }
 
-        public override void Connect()
+        private const int MaxConnectAttempts = 10;
+
+        public override async Task ConnectAsync(CancellationToken token)
         {
-            if (Connected)
+            await _io.WaitAsync(token).ConfigureAwait(false);
+            try
             {
-                Log("Already connected prior, skipping initial connection.");
-                return;
-            }
-
-            Log("Connecting to device...");
-            _closedByOwner = false;
-            int retryCount = 0;
-            const int maxRetries = 10;
-
-            while (retryCount < maxRetries)
-            {
-                try
+                _closedByOwner = false;
+                if (Connection.Connected)
                 {
-                    IAsyncResult result = Connection.BeginConnect(Info.IP, Info.Port, null, null);
-                    bool success = result.AsyncWaitHandle.WaitOne(5000, true);
-                    if (!success || !Connection.Connected)
-                    {
-                        throw new Exception("Failed to connect to device.");
-                    }
-                    Connection.EndConnect(result);
-                    Log("Connected!");
-                    Label = Name;
+                    Log("Already connected prior, skipping initial connection.");
                     return;
                 }
-                catch (Exception ex)
+
+                Log("Connecting to device...");
+                for (int attempt = 1; ; attempt++)
                 {
-                    // A timed-out BeginConnect is still pending on this socket; retry on a new one.
-                    CloseQuietly();
-                    InitializeSocket();
-                    retryCount++;
-                    Log($"Connection attempt {retryCount} failed: {ex.Message}");
-                    if (retryCount >= maxRetries)
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    timeout.CancelAfter(ConnectTimeout);
+                    try
                     {
-                        throw;
+                        await Connection.ConnectAsync(Info.IP, Info.Port, timeout.Token).ConfigureAwait(false);
+                        break;
                     }
-                    Task.Delay(1000 * retryCount).Wait(); // Wait before retrying
+                    catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+                    {
+                        // A connect that failed or timed out leaves the socket unusable; retry on a new one.
+                        CloseQuietly();
+                        InitializeSocket();
+                        token.ThrowIfCancellationRequested();
+                        Log($"Connection attempt {attempt} failed: {(ex is OperationCanceledException ? "timed out" : ex.Message)}");
+                        if (attempt >= MaxConnectAttempts)
+                            throw new IOException($"Could not connect to the console at {Info.IP}:{Info.Port}.", ex);
+                        await Task.Delay(1000 * attempt, token).ConfigureAwait(false);
+                    }
                 }
+                _dirty = false;
+                Log("Connected!");
+                Label = Name;
+            }
+            finally
+            {
+                _io.Release();
             }
         }
 
         public override void Reset()
         {
-            if (Connected)
-                Disconnect();
-            else
-                InitializeSocket();
-            Connect();
+            Disconnect();
+            ConnectAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         public override void Disconnect()
         {
-            Log("Disconnecting from device...");
-            if (Connection.Connected)
-            {
-                try { Connection.Shutdown(SocketShutdown.Both); } catch { }
-            }
-            CloseQuietly();
-            InitializeSocket();
-            _dirty = false;
+            // Closed first, so a command that slips in once the socket is gone can't reopen it.
             _closedByOwner = true;
-            Log("Disconnected! Resetting Socket.");
+            // An exchange still running is let finish first, so it isn't cut off halfway.
+            bool idle = _io.Wait(ConnectTimeout + ScreenshotTimeout);
+            try
+            {
+                Log("Disconnecting from device...");
+                if (Connection.Connected)
+                {
+                    try { Connection.Shutdown(SocketShutdown.Both); } catch { }
+                }
+                CloseQuietly();
+                InitializeSocket();
+                _dirty = false;
+                Log("Disconnected! Resetting Socket.");
+            }
+            finally
+            {
+                if (idle)
+                    _io.Release();
+            }
         }
 
         private void CloseQuietly()
@@ -114,20 +126,24 @@ namespace SysBot.Base
         // the next stray command quietly reopening sys-botbase's only connection.
         private volatile bool _closedByOwner;
         public TimeSpan ReplyTimeout { get; set; } = TimeSpan.FromSeconds(10);
+        // A screenshot can be up to a megabyte of hex text, which a weak Wi-Fi link takes a while to move.
+        public TimeSpan ScreenshotTimeout { get; set; } = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
 
-        private async Task<T> ExchangeAsync<T>(byte[] command, Func<CancellationToken, ValueTask<T>> receive, CancellationToken token)
+        // A running timer keeps running through retries, so a retried exchange counts its backoff too.
+        private async Task<T> ExchangeAsync<T>(byte[] command, Func<CancellationToken, ValueTask<T>> receive, CancellationToken token, Stopwatch? timer = null, TimeSpan? replyTimeout = null)
         {
             await _io.WaitAsync(token).ConfigureAwait(false);
             try
             {
+                timer?.Start();
                 if (_closedByOwner)
                     throw new InvalidOperationException("Not connected to the console; start the bot first.");
                 if (_dirty || !Connection.Connected || Connection.Available > 0)
                     await ReconnectAsync(token).ConfigureAwait(false);
 
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                timeout.CancelAfter(ReplyTimeout);
+                timeout.CancelAfter(replyTimeout ?? ReplyTimeout);
                 try
                 {
                     await Connection.SendAsync(command, SocketFlags.None, timeout.Token).ConfigureAwait(false);
@@ -209,7 +225,7 @@ namespace SysBot.Base
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(buffer, true);
+                    ArrayPool<byte>.Shared.Return(buffer);
                 }
             }, ct), token).ConfigureAwait(false);
         }
@@ -228,12 +244,6 @@ namespace SysBot.Base
 
         public async Task<byte[]> ReadBytesAbsoluteAsync(ulong offset, int length, CancellationToken token) => await Read(offset, length, Absolute, token).ConfigureAwait(false);
 
-        public async Task<byte[]> ReadBytesMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => await ReadMulti(offsetSizes, Heap, token).ConfigureAwait(false);
-
-        public async Task<byte[]> ReadBytesMainMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => await ReadMulti(offsetSizes, Main, token).ConfigureAwait(false);
-
-        public async Task<byte[]> ReadBytesAbsoluteMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => await ReadMulti(offsetSizes, Absolute, token).ConfigureAwait(false);
-
         public async Task WriteBytesAsync(byte[] data, uint offset, CancellationToken token) => await Write(data, offset, Heap, token).ConfigureAwait(false);
 
         public async Task WriteBytesMainAsync(byte[] data, ulong offset, CancellationToken token) => await Write(data, offset, Main, token).ConfigureAwait(false);
@@ -242,16 +252,14 @@ namespace SysBot.Base
 
         public async Task<ulong> GetMainNsoBaseAsync(CancellationToken token)
         {
-            byte[] baseBytes = await ReadBytesFromCmdAsync(SwitchCommand.GetMainNsoBase(), sizeof(ulong), token).ConfigureAwait(false);
-            Array.Reverse(baseBytes, 0, 8);
-            return BitConverter.ToUInt64(baseBytes, 0);
+            var bytes = await ReadBytesFromCmdAsync(SwitchCommand.GetMainNsoBase(), sizeof(ulong), token).ConfigureAwait(false);
+            return ReadUInt64BigEndian(bytes);
         }
 
         public async Task<ulong> GetHeapBaseAsync(CancellationToken token)
         {
-            var baseBytes = await ReadBytesFromCmdAsync(SwitchCommand.GetHeapBase(), sizeof(ulong), token).ConfigureAwait(false);
-            Array.Reverse(baseBytes, 0, 8);
-            return BitConverter.ToUInt64(baseBytes, 0);
+            var bytes = await ReadBytesFromCmdAsync(SwitchCommand.GetHeapBase(), sizeof(ulong), token).ConfigureAwait(false);
+            return ReadUInt64BigEndian(bytes);
         }
 
         public async Task<string> GetTitleID(CancellationToken token)
@@ -271,7 +279,7 @@ namespace SysBot.Base
         public async Task<string> GetGameInfo(string info, CancellationToken token)
         {
             var bytes = await ReadRaw(SwitchCommand.GetGameInfo(info), 17, token).ConfigureAwait(false);
-            return Encoding.ASCII.GetString(bytes).Trim(new char[] { '\0', '\n' });
+            return Encoding.ASCII.GetString(bytes).Trim('\0', '\n');
         }
 
         public async Task<bool> IsProgramRunning(ulong pid, CancellationToken token)
@@ -304,14 +312,6 @@ namespace SysBot.Base
             return result;
         }
 
-        private async Task<byte[]> ReadMulti(IReadOnlyDictionary<ulong, int> offsetSizes, SwitchOffsetType type, CancellationToken token)
-        {
-            var method = type.GetReadMultiMethod();
-            var cmd = method(offsetSizes);
-            var totalSize = offsetSizes.Values.Sum();
-            return await ReadBytesFromCmdAsync(cmd, totalSize, token).ConfigureAwait(false);
-        }
-
         private async Task Write(byte[] data, ulong offset, SwitchOffsetType type, CancellationToken token)
         {
             var method = type.GetWriteMethod();
@@ -321,17 +321,17 @@ namespace SysBot.Base
                 await SendAsync(cmd, token).ConfigureAwait(false);
                 return;
             }
-            int byteCount = data.Length;
-            for (int i = 0; i < byteCount; i += MaximumTransferSize)
+            foreach (var chunk in data.Chunk(MaximumTransferSize))
             {
-                var slice = data.SliceSafe(i, MaximumTransferSize);
-                var cmd = method(offset + (uint)i, slice);
-                await SendAsync(cmd, token).ConfigureAwait(false);
+                await SendAsync(method(offset, chunk), token).ConfigureAwait(false);
+                offset += (ulong)chunk.Length;
                 await Task.Delay((MaximumTransferSize / DelayFactor) + BaseDelay, token).ConfigureAwait(false);
             }
         }
 
-        public async Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token)
+        public Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token) => ReadRaw(command, length, token, null);
+
+        private async Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token, Stopwatch? timer)
         {
             return await RetryOperation(ct => ExchangeAsync(command, async t =>
             {
@@ -340,7 +340,14 @@ namespace SysBot.Base
                 if (buffer[received - 1] != (byte)'\n')
                     throw new IOException($"The console sent a reply longer than {length} bytes.");
                 return buffer;
-            }, ct), token).ConfigureAwait(false);
+            }, ct, timer), token).ConfigureAwait(false);
+        }
+
+        public async Task<TimeSpan> PingAsync(CancellationToken token)
+        {
+            var answered = new Stopwatch();
+            await ReadRaw(SwitchCommand.GetTitleID(), 17, token, answered).ConfigureAwait(false);
+            return answered.Elapsed;
         }
 
         /// <summary>
@@ -367,11 +374,6 @@ namespace SysBot.Base
             return read;
         }
 
-        public async Task SendRaw(byte[] command, CancellationToken token)
-        {
-            await SendAsync(command, token).ConfigureAwait(false);
-        }
-
         public async Task<byte[]> PointerPeek(int size, IEnumerable<long> jumps, CancellationToken token)
         {
             return await ReadBytesFromCmdAsync(SwitchCommand.PointerPeek(jumps, size), size, token).ConfigureAwait(false);
@@ -384,16 +386,8 @@ namespace SysBot.Base
 
         public async Task<ulong> PointerAll(IEnumerable<long> jumps, CancellationToken token)
         {
-            var offsetBytes = await ReadBytesFromCmdAsync(SwitchCommand.PointerAll(jumps), sizeof(ulong), token).ConfigureAwait(false);
-            Array.Reverse(offsetBytes, 0, 8);
-            return BitConverter.ToUInt64(offsetBytes, 0);
-        }
-
-        public async Task<ulong> PointerRelative(IEnumerable<long> jumps, CancellationToken token)
-        {
-            var offsetBytes = await ReadBytesFromCmdAsync(SwitchCommand.PointerRelative(jumps), sizeof(ulong), token).ConfigureAwait(false);
-            Array.Reverse(offsetBytes, 0, 8);
-            return BitConverter.ToUInt64(offsetBytes, 0);
+            var bytes = await ReadBytesFromCmdAsync(SwitchCommand.PointerAll(jumps), sizeof(ulong), token).ConfigureAwait(false);
+            return ReadUInt64BigEndian(bytes);
         }
 
         public async Task<byte[]> PixelPeek(CancellationToken token)
@@ -401,18 +395,17 @@ namespace SysBot.Base
             // No retry: a missed screenshot only costs the embed its picture.
             try
             {
-                var data = await ExchangeAsync(SwitchCommand.PixelPeek(), ReceiveLineAsync, token).ConfigureAwait(false);
-                return Decoder.ConvertHexByteStringToBytes(data);
+                var line = await ExchangeAsync(SwitchCommand.PixelPeek(), ReceiveLineAsync, token, replyTimeout: ScreenshotTimeout).ConfigureAwait(false);
+                return Decoder.ConvertHexByteStringToBytes(line.WrittenSpan[..^1]);
             }
             catch (Exception ex) when (ex is IOException or SocketException or ArgumentOutOfRangeException)
             {
-                _dirty = true;
                 LogError($"Could not read the screenshot: {ex.Message}");
                 return [];
             }
         }
 
-        private async ValueTask<byte[]> ReceiveLineAsync(CancellationToken token)
+        private async ValueTask<ArrayBufferWriter<byte>> ReceiveLineAsync(CancellationToken token)
         {
             var data = new ArrayBufferWriter<byte>(0x40000);
             while (true)
@@ -423,15 +416,14 @@ namespace SysBot.Base
                     throw new SocketException((int)SocketError.ConnectionReset);
                 data.Advance(count);
                 if (data.WrittenSpan[^1] == (byte)'\n')
-                    return data.WrittenSpan[..^1].ToArray();
+                    return data;
             }
         }
 
         public async Task<long> GetUnixTime(CancellationToken token)
         {
-            var result = await ReadBytesFromCmdAsync(SwitchCommand.GetUnixTime(), 8, token).ConfigureAwait(false);
-            Array.Reverse(result);
-            return BitConverter.ToInt64(result, 0);
+            var bytes = await ReadBytesFromCmdAsync(SwitchCommand.GetUnixTime(), sizeof(long), token).ConfigureAwait(false);
+            return ReadInt64BigEndian(bytes);
         }
 
         private async Task<T> RetryOperation<T>(Func<CancellationToken, Task<T>> operation, CancellationToken token, int maxRetries = 3)
@@ -441,7 +433,7 @@ namespace SysBot.Base
             {
                 try
                 {
-                    return await operation(token);
+                    return await operation(token).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is SocketException or IOException)
                 {
@@ -450,7 +442,7 @@ namespace SysBot.Base
 
                     int delay = (int)Math.Pow(2, retryCount) * 1000; // Exponential backoff
                     Log($"Connection error. Retrying in {delay}ms. Attempt {retryCount} of {maxRetries}");
-                    await Task.Delay(delay, token);
+                    await Task.Delay(delay, token).ConfigureAwait(false);
                 }
             }
         }

@@ -13,16 +13,13 @@ namespace SysBot.Base
 
         private static bool IsHexLower(char c) => (uint)(c - 'a') <= 5;
 
-        public static byte[] ConvertHexByteStringToBytes(byte[] bytes)
+        public static byte[] ConvertHexByteStringToBytes(ReadOnlySpan<byte> hex)
         {
-            var dest = new byte[bytes.Length / 2];
-            for (int i = 0; i < dest.Length; i++)
-            {
-                int ofs = i * 2;
-                var _0 = (char)bytes[ofs + 0];
-                var _1 = (char)bytes[ofs + 1];
-                dest[i] = DecodeTuple(_0, _1);
-            }
+            // An odd count means a digit went missing, so every byte after it would be wrong.
+            if (hex.Length % 2 != 0)
+                throw new ArgumentOutOfRangeException(nameof(hex), $"Hex text has an odd number of digits ({hex.Length}).");
+            var dest = new byte[hex.Length / 2];
+            LoadHexBytesTo(hex, dest, 2);
             return dest;
         }
 

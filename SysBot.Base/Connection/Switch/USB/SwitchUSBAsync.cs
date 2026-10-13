@@ -32,12 +32,6 @@ namespace SysBot.Base
 
         public Task<byte[]> ReadBytesAbsoluteAsync(ulong offset, int length, CancellationToken token) => Task.Run(() => Read(offset, length, Absolute.GetReadMethod(false)), token);
 
-        public Task<byte[]> ReadBytesMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => Task.Run(() => ReadMulti(offsetSizes, Heap.GetReadMultiMethod(false)), token);
-
-        public Task<byte[]> ReadBytesMainMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => Task.Run(() => ReadMulti(offsetSizes, Main.GetReadMultiMethod(false)), token);
-
-        public Task<byte[]> ReadBytesAbsoluteMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => Task.Run(() => ReadMulti(offsetSizes, Absolute.GetReadMultiMethod(false)), token);
-
         public Task WriteBytesAsync(byte[] data, uint offset, CancellationToken token) => Task.Run(() => Write(data, offset, Heap.GetWriteMethod(false)), token);
 
         public Task WriteBytesMainAsync(byte[] data, ulong offset, CancellationToken token) => Task.Run(() => Write(data, offset, Main.GetWriteMethod(false)), token);
@@ -70,6 +64,8 @@ namespace SysBot.Base
                 return BitConverter.ToUInt64(baseBytes, 0).ToString("X16").Trim();
             }, token);
         }
+
+        public Task<TimeSpan> PingAsync(CancellationToken token) => Task.Run(() => TimeExchange(SwitchCommand.GetTitleID(false)), token);
 
         public Task<string> GetBotbaseVersion(CancellationToken token)
         {
@@ -106,11 +102,6 @@ namespace SysBot.Base
             }, token);
         }
 
-        public Task SendRaw(byte[] command, CancellationToken token)
-        {
-            return Task.Run(() => Send(command), token);
-        }
-
         public Task<byte[]> PointerPeek(int size, IEnumerable<long> jumps, CancellationToken token)
         {
             return Task.Run(() =>
@@ -132,15 +123,6 @@ namespace SysBot.Base
             return Task.Run(() =>
             {
                 byte[] baseBytes = Exchange(SwitchCommand.PointerAll(jumps, false));
-                return BitConverter.ToUInt64(baseBytes, 0);
-            }, token);
-        }
-
-        public Task<ulong> PointerRelative(IEnumerable<long> jumps, CancellationToken token)
-        {
-            return Task.Run(() =>
-            {
-                byte[] baseBytes = Exchange(SwitchCommand.PointerRelative(jumps, false));
                 return BitConverter.ToUInt64(baseBytes, 0);
             }, token);
         }

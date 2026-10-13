@@ -37,7 +37,7 @@ namespace SysBot.Tests
                 listener.Stop();
             });
             var socket = SwitchSocketAsync.CreateInstance(new SwitchConnectionConfig { IP = "127.0.0.1", Port = port });
-            socket.Connect();
+            await socket.ConnectAsync(CancellationToken.None);
             return (socket, server);
         }
 
@@ -76,7 +76,7 @@ namespace SysBot.Tests
                 listener.Stop();
             });
             var socket = SwitchSocketAsync.CreateInstance(new SwitchConnectionConfig { IP = "127.0.0.1", Port = port });
-            socket.Connect();
+            await socket.ConnectAsync(CancellationToken.None);
 
             var reads = new Task<byte[]>[8];
             for (int i = 0; i < reads.Length; i++)
@@ -102,7 +102,7 @@ namespace SysBot.Tests
         // answer, not decode garbage.
         // A fake sys-botbase that answers one command per connection, so a test can
         // see the client drop a connection and come back on a new one.
-        private static (SwitchSocketAsync Socket, Task Server) StartPerConnection(params string?[] replies)
+        private static async Task<(SwitchSocketAsync Socket, Task Server)> StartPerConnection(params string?[] replies)
         {
             var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
@@ -128,7 +128,8 @@ namespace SysBot.Tests
             });
             var socket = SwitchSocketAsync.CreateInstance(new SwitchConnectionConfig { IP = "127.0.0.1", Port = port });
             socket.ReplyTimeout = TimeSpan.FromMilliseconds(500);
-            socket.Connect();
+            socket.ScreenshotTimeout = TimeSpan.FromMilliseconds(500);
+            await socket.ConnectAsync(CancellationToken.None);
             return (socket, server);
         }
 
@@ -139,9 +140,61 @@ namespace SysBot.Tests
         [InlineData(null)]                 // no answer at all
         public async Task OutOfStepReplyReconnectsAndRetries(string? firstReply)
         {
-            var (socket, server) = StartPerConnection(firstReply, "AABBCCDD\n");
+            var (socket, server) = await StartPerConnection(firstReply, "AABBCCDD\n");
             (await socket.ReadBytesAbsoluteAsync(0x1000, 4, CancellationToken.None)).Should().Equal(0xAA, 0xBB, 0xCC, 0xDD);
             await server;
+        }
+
+        // A stopped bot's connection stays closed; a stray command from the web panel
+        // must not reopen sys-botbase's only connection behind its back.
+        [Fact]
+        public async Task DisconnectedSocketStaysClosed()
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var accepted = 0;
+            var server = Task.Run(async () =>
+            {
+                try
+                {
+                    while (true)
+                    {
+                        using var client = await listener.AcceptTcpClientAsync();
+                        Interlocked.Increment(ref accepted);
+                    }
+                }
+                catch (SocketException) { }
+                catch (ObjectDisposedException) { }
+            });
+            var socket = SwitchSocketAsync.CreateInstance(new SwitchConnectionConfig { IP = "127.0.0.1", Port = port });
+            await socket.ConnectAsync(CancellationToken.None);
+            socket.Disconnect();
+
+            var read = () => socket.ReadBytesAbsoluteAsync(0x1000, 4, CancellationToken.None);
+            await read.Should().ThrowAsync<InvalidOperationException>();
+            await Task.Delay(200);
+            accepted.Should().Be(1);
+            listener.Stop();
+            await server;
+        }
+
+        // Stopping the bot while the Switch is off the network must not wait out every
+        // connection attempt, which takes over a minute.
+        [Fact]
+        public async Task ConnectingGivesUpWhenStopped()
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            listener.Stop();
+            var socket = SwitchSocketAsync.CreateInstance(new SwitchConnectionConfig { IP = "127.0.0.1", Port = port });
+
+            using var stop = new CancellationTokenSource(TimeSpan.FromMilliseconds(1_500));
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            var connect = () => socket.ConnectAsync(stop.Token);
+            await connect.Should().ThrowAsync<OperationCanceledException>();
+            waited.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(4));
         }
 
         // The 10/03 outage itself: the screenshot stalls partway, then the next read
@@ -149,7 +202,7 @@ namespace SysBot.Tests
         [Fact]
         public async Task StalledScreenshotDoesNotPoisonTheNextRead()
         {
-            var (socket, server) = StartPerConnection("FFD8FFE000104A46", "01020304\n");
+            var (socket, server) = await StartPerConnection("FFD8FFE000104A46", "01020304\n");
             (await socket.PixelPeek(CancellationToken.None)).Should().BeEmpty();
             (await socket.ReadBytesAbsoluteAsync(0x1000, 4, CancellationToken.None)).Should().Equal(1, 2, 3, 4);
             await server;

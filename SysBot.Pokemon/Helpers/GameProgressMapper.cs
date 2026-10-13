@@ -6,23 +6,6 @@
     public static class GameProgressMapper
     {
         /// <summary>
-        /// Converts from the bot's GameProgressEnum to RaidCrawler's integer progress system.
-        /// </summary>
-        /// <param name="progress">Game progress enum value</param>
-        /// <returns>Integer progress value used by RaidCrawler</returns>
-        public static int ToRaidCrawlerProgress(GameProgressEnum progress)
-        {
-            return progress switch
-            {
-                GameProgressEnum.Unlocked3Stars => 1,
-                GameProgressEnum.Unlocked4Stars => 2,
-                GameProgressEnum.Unlocked5Stars => 3,
-                GameProgressEnum.Unlocked6Stars => 4,
-                _ => 0,
-            };
-        }
-
-        /// <summary>
         /// Gets the expected raid star difficulty range for a given progress level.
         /// </summary>
         /// <param name="progress">Game progress enum value</param>

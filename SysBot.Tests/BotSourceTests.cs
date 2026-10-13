@@ -103,6 +103,33 @@ namespace SysBot.Tests
             listener.Stop();
         }
 
+        // The web panel, Discord and the GUI can all press Start at once, during a Stop or after it.
+        [Fact]
+        public async Task StartsFromManyThreadsRunOneLoop()
+        {
+            var (source, bot, listener) = Create();
+            source.Start();
+            await WaitFor(() => bot.Running == 1);
+
+            source.Stop();
+            Parallel.For(0, 16, _ => source.Start());
+            await WaitFor(() => bot.Runs == 3);
+            await Task.Delay(2_000);
+            bot.Runs.Should().Be(3);
+
+            source.Stop();
+            await WaitFor(() => !source.IsRunning);
+            Parallel.For(0, 16, _ => source.Start());
+            await WaitFor(() => bot.Runs == 4);
+            await Task.Delay(500);
+            bot.Runs.Should().Be(4);
+            bot.MostAtOnce.Should().Be(1);
+
+            source.Stop();
+            await WaitFor(() => !source.IsRunning);
+            listener.Stop();
+        }
+
         // 10/07: 30 crashes over three hours and nobody was told.
         [Fact]
         public void OwnerHearsAboutACrashLoop()

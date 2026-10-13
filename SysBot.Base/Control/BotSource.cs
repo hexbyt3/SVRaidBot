@@ -14,7 +14,7 @@ namespace SysBot.Base
         public bool IsRunning { get; private set; }
         public bool IsPaused { get; private set; }
 
-        public bool IsStopping { get; set; }
+        public bool IsStopping { get; private set; }
 
         // The routine that is running now. Stop waits for it to really end, so a
         // quick Stop then Start can't leave two loops sharing one Switch. Each launch
@@ -22,6 +22,10 @@ namespace SysBot.Base
         // state of the one launched after it.
         private Task _routine = Task.CompletedTask;
         private int _generation;
+
+        // Start, Stop and the web panel's buttons arrive on different threads. Checking
+        // the flags and acting on them happen together, or two Starts both see "stopped".
+        private readonly object _gate = new();
 
         // Connecting alone can take ~95 s when the Switch is off the network.
         private static readonly TimeSpan StopWait = TimeSpan.FromMinutes(2);
@@ -41,14 +45,18 @@ namespace SysBot.Base
 
         public void Stop()
         {
-            if (!IsRunning || IsStopping)
-                return;
+            Task routine;
+            lock (_gate)
+            {
+                if (!IsRunning || IsStopping)
+                    return;
 
-            IsStopping = true;
-            Source.Cancel();
-            Source = new CancellationTokenSource();
-            Interlocked.Increment(ref _generation);
-            var routine = _routine;
+                IsStopping = true;
+                Source.Cancel();
+                Source = new CancellationTokenSource();
+                Interlocked.Increment(ref _generation);
+                routine = _routine;
+            }
 
             Task.Run(async () =>
             {
@@ -68,7 +76,8 @@ namespace SysBot.Base
                 }
                 finally
                 {
-                    IsPaused = IsRunning = IsStopping = false;
+                    lock (_gate)
+                        IsPaused = IsRunning = IsStopping = false;
                 }
             });
         }
@@ -92,11 +101,14 @@ namespace SysBot.Base
             if (IsPaused)
                 Stop(); // can't soft-resume; just re-launch
 
-            if (!IsStopping)
+            lock (_gate)
             {
-                if (!IsRunning)
-                    Launch(routine);
-                return;
+                if (!IsStopping)
+                {
+                    if (!IsRunning)
+                        Launch(routine);
+                    return;
+                }
             }
 
             Task.Run(async () =>
@@ -104,8 +116,11 @@ namespace SysBot.Base
                 var deadline = DateTime.Now + StopWait + TimeSpan.FromSeconds(30);
                 while (IsStopping && DateTime.Now < deadline)
                     await Task.Delay(100).ConfigureAwait(false);
-                if (!IsRunning && !IsStopping)
-                    Launch(routine);
+                lock (_gate)
+                {
+                    if (!IsRunning && !IsStopping)
+                        Launch(routine);
+                }
             });
         }
 
@@ -152,8 +167,11 @@ namespace SysBot.Base
                     routine = Bot.RunAsync;
                 }
 
-                if (generation == _generation && !IsStopping)
-                    IsPaused = IsRunning = false;
+                lock (_gate)
+                {
+                    if (generation == _generation && !IsStopping)
+                        IsPaused = IsRunning = false;
+                }
             });
         }
 
