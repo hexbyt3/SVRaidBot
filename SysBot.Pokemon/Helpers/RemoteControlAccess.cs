@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Text.Json.Serialization;
 
 namespace SysBot.Pokemon
 {
@@ -15,14 +16,25 @@ namespace SysBot.Pokemon
         public override string ToString() => $"{Name} = {ID} // {Comment}";
     }
 
+    /// <summary>
+    /// Discord commands change these lists while the bot thread reads them, so every
+    /// member locks. <see cref="List"/> stays public for config.json and the settings grid.
+    /// </summary>
     [TypeConverter(typeof(ExpandableObjectConverter))]
     public class RemoteControlAccessList
     {
+        private readonly object _gate = new();
+        private List<RemoteControlAccess> _list = [];
+
         /// <summary>
         /// Don't mutate this list; use <see cref="AddIfNew"/> and <see cref="RemoveAll"/>.
         /// This is public for serialization purposes.
         /// </summary>
-        public List<RemoteControlAccess> List { get; set; } = new();
+        public List<RemoteControlAccess> List
+        {
+            get { lock (_gate) return _list; }
+            set { lock (_gate) _list = value ?? []; }
+        }
 
         /// <summary>
         /// Allows Bot-Specific role lists to permit anyone to use the bot if there are no roles specified.
@@ -32,51 +44,72 @@ namespace SysBot.Pokemon
         /// </remarks>
         public bool AllowIfEmpty { get; set; } = true;
 
-        /// <summary> Checks if any item has the requested <see cref="id"/> property. </summary>
-        /// <returns>True if any item matches the <see cref="id"/></returns>
-        /// <remarks>Used for unique IDs such as Users or Channels</remarks>
-        public bool Contains(ulong id) => List.Any(z => z.ID == id);
+        [JsonIgnore, Browsable(false)]
+        public int Count { get { lock (_gate) return _list.Count; } }
 
-        /// <summary> Checks if any item has the requested <see cref="name"/> property. </summary>
-        /// <returns>True if any item matches the <see cref="name"/></returns>
-        /// <remarks>Used for checking Role Names</remarks>
-        public bool Contains(string name) => List.Any(z => z.Name == name);
+        /// <summary>Used for unique IDs such as Users or Channels.</summary>
+        public bool Contains(ulong id) => Find(id) is not null;
 
-        public int RemoveAll(Predicate<RemoteControlAccess> item) => List.RemoveAll(item);
+        /// <summary>Used for checking Role Names.</summary>
+        public bool Contains(string name)
+        {
+            lock (_gate)
+                return _list.Any(z => z.Name == name);
+        }
 
-        public void Clear() => List.Clear();
+        public RemoteControlAccess? Find(ulong id)
+        {
+            lock (_gate)
+                return _list.Find(z => z.ID == id);
+        }
+
+        public List<RemoteControlAccess> Snapshot()
+        {
+            lock (_gate)
+                return [.. _list];
+        }
+
+        public int RemoveAll(Predicate<RemoteControlAccess> item)
+        {
+            lock (_gate)
+                return _list.RemoveAll(item);
+        }
+
+        public void Clear()
+        {
+            lock (_gate)
+                _list.Clear();
+        }
 
         /// <summary>
         /// Adds new items if not already present by <see cref="RemoteControlAccess.ID"/>.
         /// </summary>
-        /// <param name="list">List of items to add</param>
         public void AddIfNew(IEnumerable<RemoteControlAccess> list)
         {
-            foreach (var item in list)
+            lock (_gate)
             {
-                if (!Contains(item.ID))
-                    List.Add(item);
+                foreach (var item in list)
+                {
+                    if (!_list.Exists(z => z.ID == item.ID))
+                        _list.Add(item);
+                }
             }
         }
 
         /// <summary>
-        /// Used with foreach iterating. You shouldn't be calling this manually.
+        /// Enumerates a copy, so foreach is safe while commands change the list.
         /// </summary>
-        public IEnumerator<RemoteControlAccess> GetEnumerator() => List.GetEnumerator();
+        public IEnumerator<RemoteControlAccess> GetEnumerator() => Snapshot().GetEnumerator();
 
         /// <summary>
         /// Used for summarizing this object in a PropertyGrid.
         /// </summary>
         public override string ToString()
         {
-            return List.Count == 0
+            var count = Count;
+            return count == 0
                 ? (AllowIfEmpty ? "Anyone allowed" : "None allowed (none specified).")
-                : $"{List.Count} entries specified.";
+                : $"{count} entries specified.";
         }
-
-        /// <summary>
-        /// Gets an enumerable summary of the items in this object.
-        /// </summary>
-        public IEnumerable<string> Summarize() => List.Select(z => z.ToString());
     }
 }

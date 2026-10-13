@@ -41,7 +41,6 @@ namespace SysBot.Pokemon.Discord
             public readonly string ChannelName;
             public readonly Action<string> Action;
             public readonly Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>> RaidAction;
-            public string EmbedResult = string.Empty;
 
             public EchoChannel(ulong channelId, string channelName, Action<string> action, Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>> raidAction)
             {
@@ -52,23 +51,7 @@ namespace SysBot.Pokemon.Discord
             }
         }
 
-        private class EncounterEchoChannel
-        {
-            public readonly ulong ChannelID;
-            public readonly string ChannelName;
-            public readonly Action<string, Embed> EmbedAction;
-            public string EmbedResult = string.Empty;
-
-            public EncounterEchoChannel(ulong channelId, string channelName, Action<string, Embed> embedaction)
-            {
-                ChannelID = channelId;
-                ChannelName = channelName;
-                EmbedAction = embedaction;
-            }
-        }
-
         private static readonly Dictionary<ulong, EchoChannel> Channels = new();
-        private static readonly Dictionary<ulong, EncounterEchoChannel> EncounterChannels = new();
 
         public static void RestoreChannels(DiscordSocketClient discord, DiscordSettings cfg)
         {
@@ -125,8 +108,15 @@ namespace SysBot.Pokemon.Discord
             }
             var confirmationMessage = await ReplyAsync("Announcement sent to all EchoChannels.").ConfigureAwait(false);
             await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-            await confirmationMessage.DeleteAsync().ConfigureAwait(false);
-            await Context.Message.DeleteAsync().ConfigureAwait(false);
+            try
+            {
+                await confirmationMessage.DeleteAsync().ConfigureAwait(false);
+                await Context.Message.DeleteAsync().ConfigureAwait(false);
+            }
+            catch (global::Discord.Net.HttpException)
+            {
+                // No Manage Messages here, or it's a DM; the announcement already went out.
+            }
         }
 
         private Color GetRandomColor()
@@ -289,19 +279,18 @@ namespace SysBot.Pokemon.Discord
             return Channels.TryGetValue(cid, out _);
         }
 
-        public static bool IsEmbedEchoChannel(ISocketMessageChannel c)
-        {
-            var cid = c.Id;
-            return EncounterChannels.TryGetValue(cid, out _);
-        }
-
         [Command("echoInfo")]
         [Summary("Dumps the special message (Echo) settings.")]
         [RequireSudo]
         public async Task DumpEchoInfoAsync()
         {
-            foreach (var c in Channels)
-                await ReplyAsync($"{c.Key} - {c.Value}").ConfigureAwait(false);
+            if (Channels.Count == 0)
+            {
+                await ReplyAsync("Not posting raid embeds to any channel.").ConfigureAwait(false);
+                return;
+            }
+            var lines = Channels.Values.Select(c => $"#{c.ChannelName} ({c.ChannelID})");
+            await ReplyAsync($"Posting raid embeds to:\n{string.Join("\n", lines)}").ConfigureAwait(false);
         }
 
         [Command("echoClear")]
@@ -332,7 +321,7 @@ namespace SysBot.Pokemon.Discord
             foreach (var l in Channels)
             {
                 var entry = l.Value;
-                await ReplyAsync($"Echoing cleared from {entry.ChannelName} ({entry.ChannelID}!").ConfigureAwait(false);
+                await ReplyAsync($"Echoing cleared from {entry.ChannelName} ({entry.ChannelID})!").ConfigureAwait(false);
                 EchoUtil.Forwarders.Remove(entry.Action);
             }
             EchoUtil.Forwarders.RemoveAll(y => Channels.Select(x => x.Value.Action).Contains(y));

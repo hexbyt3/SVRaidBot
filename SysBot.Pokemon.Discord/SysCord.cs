@@ -1,6 +1,5 @@
 ﻿using Discord;
 using Discord.Commands;
-using Discord.Rest;
 using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using PKHeX.Core;
@@ -19,25 +18,28 @@ namespace SysBot.Pokemon.Discord
     {
         public static DiscordManager Manager { get; internal set; } = default!;
         public static DiscordSettings Settings => Manager.Config;
-        public static PokeRaidHubConfig? HubConfig { get; internal set; } = default!;
+
+        /// <summary>True when Discord withheld the Message Content intent, so only @mentions and DMs reach the bot.</summary>
+        public static bool MentionOnly { get; internal set; }
+
+        /// <summary>How to write <paramref name="command"/> so it reaches the bot: prefixed, or after an @mention in mention-only mode.</summary>
+        public static string CommandUsage(IUser bot, string command)
+            => MentionOnly ? $"{bot.Mention} `{command}`" : $"`{Settings.CommandPrefix}{command}`";
     }
 
     public sealed class SysCord<T> where T : PKM, new()
     {
         public static PokeBotRunner<T> Runner { get; private set; } = default!;
-        public static RestApplication? App { get; private set; } = default!;
 
-        public static SysCord<T>? Instance { get; private set; }
         public static ReactionService ReactionService { get; private set; } = default!;
-        private readonly DiscordSocketClient _client;
+        private DiscordSocketClient _client = default!;
         private readonly DiscordManager Manager;
         public readonly PokeRaidHub<T> Hub;
         private const int MaxReconnectDelay = 60000; // 1 minute
-        private int _reconnectAttempts = 0;
-        // Keep the CommandService and DI container around for use with commands.
-        // These two types require you install the Discord.Net.Commands package.
+        private int _reconnectAttempts;
+        private volatile bool _stoppedForGood;
+        private readonly RaidCodeCooldown _codeCooldown = new();
         private readonly CommandService _commands;
-
         private readonly IServiceProvider _services;
 
         // Track loading of Echo/Logging channels so they aren't loaded multiple times.
@@ -48,69 +50,37 @@ namespace SysBot.Pokemon.Discord
             Runner = runner;
             Hub = runner.Hub;
             Manager = new DiscordManager(Hub.Config.Discord);
-
             SysCordSettings.Manager = Manager;
-            SysCordSettings.HubConfig = Hub.Config;
-
-            _client = new DiscordSocketClient(new DiscordSocketConfig
-            {
-                LogLevel = LogSeverity.Info,
-                GatewayIntents = GatewayIntents.Guilds
-                       | GatewayIntents.GuildMessages
-                       | GatewayIntents.DirectMessages
-                       | GatewayIntents.MessageContent
-                       | GatewayIntents.GuildMessageReactions
-                       | GatewayIntents.GuildMembers,
-                MessageCacheSize = 500,
-                AlwaysDownloadUsers = true,
-                ConnectionTimeout = 30000,
-            });
-            _client.Disconnected += (ex) => HandleDisconnect(ex);
 
             _commands = new CommandService(new CommandServiceConfig
             {
-                // Again, log level:
                 LogLevel = LogSeverity.Info,
-
-                // This makes commands get run on the task thread pool instead on the websocket read thread.
-                // This ensures long running logic can't block the websocket connection.
+                // Async runs commands on the thread pool so long ones can't block the websocket.
                 DefaultRunMode = Hub.Config.Discord.AsyncCommands ? RunMode.Async : RunMode.Sync,
-
-                // There's a few more properties you can set,
-                // for example, case-insensitive commands.
                 CaseSensitiveCommands = false,
             });
-
-            // Subscribe the logging handler to both the client and the CommandService.
-            _client.Log += Log;
             _commands.Log += Log;
-
-            // Setup your DI container.
+            _commands.CommandExecuted += OnCommandExecutedAsync;
             _services = ConfigureServices();
-            Instance = this;
+        }
+
+        private void CreateClient(GatewayIntents intents)
+        {
+            SysCordSettings.MentionOnly = (intents & GatewayIntents.MessageContent) == 0;
+            _client = new DiscordSocketClient(new DiscordSocketConfig
+            {
+                LogLevel = LogSeverity.Info,
+                GatewayIntents = intents,
+                MessageCacheSize = 500,
+                ConnectionTimeout = 30000,
+            });
+            _client.Log += Log;
+            _client.Connected += OnConnected;
+            _client.Disconnected += HandleDisconnect;
             ReactionService = new ReactionService(_client);
         }
 
-        public DiscordSocketClient GetClient()
-        {
-            return _client;
-        }
-
-        // If any services require the client, or the CommandService, or something else you keep on hand,
-        // pass them as parameters into this method as needed.
-        // If this method is getting pretty long, you can separate it out into another file using partials.
-        private static IServiceProvider ConfigureServices()
-        {
-            var map = new ServiceCollection();//.AddSingleton(new SomeServiceClass());
-
-            // When all your required services are in the collection, build the container.
-            // Tip: There's an overload taking in a 'validateScopes' bool to make sure
-            // you haven't made any mistakes in your dependency graph.
-            return map.BuildServiceProvider();
-        }
-
-        // Example of a logging handler. This can be reused by add-ons
-        // that ask for a Func<LogMessage, Task>.
+        private static IServiceProvider ConfigureServices() => new ServiceCollection().BuildServiceProvider();
 
         private static Task Log(LogMessage msg)
         {
@@ -137,60 +107,87 @@ namespace SysBot.Pokemon.Discord
             _ => Console.ForegroundColor,
         };
 
+        private Task OnConnected()
+        {
+            Interlocked.Exchange(ref _reconnectAttempts, 0);
+            return Task.CompletedTask;
+        }
+
         private Task HandleDisconnect(Exception ex)
         {
-            if (ex is GatewayReconnectException)
+            if (GatewayIntentPolicy.GetCloseCode(ex) is int code && GatewayIntentPolicy.IsFatalClose(ex))
             {
-                // Discord is telling us to reconnect, so we don't need to handle it ourselves
+                // Retrying a non-reconnectable close only burns IDENTIFYs; 1000 a day resets the token.
+                _stoppedForGood = true;
+                LogUtil.LogError($"Discord connection stopped. {GatewayIntentPolicy.DescribeFatalClose(code)}", "Discord");
+                _ = Task.Run(async () =>
+                {
+                    try { await _client.StopAsync().ConfigureAwait(false); } catch { }
+                });
                 return Task.CompletedTask;
             }
 
-            // Log the disconnection
+            // Discord asked for the reconnect and Discord.Net handles it.
+            if (ex is GatewayReconnectException)
+                return Task.CompletedTask;
+
             Log(new LogMessage(LogSeverity.Warning, "Gateway", $"Disconnected: {ex.Message}"));
 
-            // Use Task.Run to avoid blocking
-            Task.Run(async () =>
+            _ = Task.Run(async () =>
             {
-                var delay = Math.Min(MaxReconnectDelay, 1000 * Math.Pow(2, _reconnectAttempts));
-                await Task.Delay((int)delay);
-
-                try
-                {
-                    await _client.StartAsync();
-                    _reconnectAttempts = 0;
-                    await Log(new LogMessage(LogSeverity.Info, "Gateway", "Reconnected successfully")).ConfigureAwait(false);
-                }
-                catch (Exception reconnectEx)
-                {
-                    _reconnectAttempts++;
-                    await Log(new LogMessage(LogSeverity.Error, "Gateway", $"Failed to reconnect: {reconnectEx.Message}")).ConfigureAwait(false);
-                }
+                var attempt = Interlocked.Increment(ref _reconnectAttempts);
+                var delay = Math.Min(MaxReconnectDelay, 1000 * Math.Pow(2, attempt - 1));
+                await Task.Delay((int)delay).ConfigureAwait(false);
+                await TryRestartAsync().ConfigureAwait(false);
             });
 
             return Task.CompletedTask;
         }
 
+        // Discord.Net reconnects on its own after most drops; only a client that has fully stopped needs StartAsync.
+        private async Task TryRestartAsync()
+        {
+            if (_stoppedForGood || _client.ConnectionState != ConnectionState.Disconnected)
+                return;
+
+            try
+            {
+                await _client.StartAsync().ConfigureAwait(false);
+                await Log(new LogMessage(LogSeverity.Info, "Gateway", "Reconnect started.")).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await Log(new LogMessage(LogSeverity.Error, "Gateway", $"Failed to reconnect: {ex.Message}")).ConfigureAwait(false);
+            }
+        }
+
         public async Task MainAsync(string apiToken, CancellationToken token)
         {
-            // Centralize the logic for commands into a separate method.
-            await InitCommands().ConfigureAwait(false);
+            try
+            {
+                var intents = await GatewayIntentPolicy.ResolveAsync(apiToken).ConfigureAwait(false);
+                CreateClient(intents);
+                await InitCommands().ConfigureAwait(false);
 
-            // Login and connect.
-            await _client.LoginAsync(TokenType.Bot, apiToken).ConfigureAwait(false);
-            await _client.StartAsync().ConfigureAwait(false);
+                await _client.LoginAsync(TokenType.Bot, apiToken).ConfigureAwait(false);
+                await _client.StartAsync().ConfigureAwait(false);
 
-            var app = await _client.GetApplicationInfoAsync().ConfigureAwait(false);
-            Manager.Owner = app.Owner.Id;
-            App = app;
+                var app = await _client.GetApplicationInfoAsync().ConfigureAwait(false);
+                Manager.Owner = app.Owner.Id;
 
-            EchoUtil.OwnerForwarders.Clear();
-            EchoUtil.OwnerForwarders.Add(msg => app.Owner.SendMessageAsync(msg));
+                EchoUtil.OwnerForwarders.Clear();
+                EchoUtil.OwnerForwarders.Add(msg => app.Owner.SendMessageAsync(msg));
 
-            // Start the connection status check
-            _ = CheckConnectionStatus(token);
-
-            // Wait infinitely so your bot actually stays connected.
-            await MonitorStatusAsync(token).ConfigureAwait(false);
+                await CheckConnectionStatus(token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"The Discord bot could not start: {ex.Message}", "Discord");
+                LogUtil.LogSafe(ex, "Discord");
+            }
         }
 
         public async Task InitCommands()
@@ -204,17 +201,6 @@ namespace SysBot.Pokemon.Discord
                 var genModule = t.MakeGenericType(typeof(T));
                 await _commands.AddModuleAsync(genModule, _services).ConfigureAwait(false);
             }
-            var modules = _commands.Modules.ToList();
-
-            foreach (var module in modules)
-            {
-                var name = module.Name;
-                name = name.Replace("Module", "");
-                var gen = name.IndexOf('`');
-                if (gen != -1)
-                    name = name[..gen];
-            }
-
             SharedRaidCodeHandler.UpdateMessageReactionCallback = async (messageId, channelId, isActive) =>
             {
                 try
@@ -253,24 +239,36 @@ namespace SysBot.Pokemon.Discord
             _client.ReactionAdded += ExtraCommandUtil<T>.HandleReactionAsync;
         }
 
-        private async Task HandleReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage,
+        private Task HandleReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage,
             Cacheable<IMessageChannel, ulong> originChannel, SocketReaction reaction)
         {
-            // Ignore reactions from bots (including our own)
-            if (reaction.User.Value.IsBot)
-                return;
-            if (reaction.Emote.Name != "✅")
-                return;
+            if (reaction.UserId == _client.CurrentUser.Id || reaction.Emote.Name != "✅")
+                return Task.CompletedTask;
             if (!SharedRaidCodeHandler.IsActiveRaidMessage(reaction.MessageId))
-                return;
+                return Task.CompletedTask;
+            if (!_codeCooldown.TryStart(reaction.MessageId, reaction.UserId, DateTime.UtcNow))
+                return Task.CompletedTask;
 
+            _ = Task.Run(() => SendRaidCodeAsync(originChannel, reaction));
+            return Task.CompletedTask;
+        }
+
+        private async Task SendRaidCodeAsync(Cacheable<IMessageChannel, ulong> originChannel, SocketReaction reaction)
+        {
             var code = SharedRaidCodeHandler.GetRaidCodeForMessage(reaction.MessageId);
             if (string.IsNullOrEmpty(code))
                 return;
             var raidInfoDict = SharedRaidCodeHandler.GetRaidInfoDict(reaction.MessageId);
             try
             {
-                var dmChannel = await reaction.User.Value.CreateDMChannelAsync();
+                // Reactions from members outside the cache arrive without a user object.
+                var user = reaction.User.IsSpecified
+                    ? reaction.User.Value
+                    : await ((IDiscordClient)_client).GetUserAsync(reaction.UserId, CacheMode.AllowDownload).ConfigureAwait(false);
+                if (user is null || user.IsBot)
+                    return;
+
+                var dmChannel = await user.CreateDMChannelAsync().ConfigureAwait(false);
                 bool isShiny = raidInfoDict != null &&
                               raidInfoDict.TryGetValue("IsShiny", out var shinyStr) &&
                               bool.TryParse(shinyStr, out var shinyBool) &&
@@ -374,72 +372,60 @@ namespace SysBot.Pokemon.Discord
 
         private async Task HandleMessageAsync(SocketMessage arg)
         {
-            // Bail out if it's a System Message.
             if (arg is not SocketUserMessage msg)
                 return;
 
-            // We don't want the bot to respond to itself or other bots.
             if (msg.Author.Id == _client.CurrentUser.Id || msg.Author.IsBot)
                 return;
 
-            // Create a number to track where the prefix ends and the command begins
             int pos = 0;
-            if (msg.HasStringPrefix(Hub.Config.Discord.CommandPrefix, ref pos))
-            {
-                bool handled = await TryHandleCommandAsync(msg, pos).ConfigureAwait(false);
-                if (handled)
-                    return;
-            }
+            if (msg.HasStringPrefix(Hub.Config.Discord.CommandPrefix, ref pos) || msg.HasMentionPrefix(_client.CurrentUser, ref pos))
+                await TryHandleCommandAsync(msg, pos).ConfigureAwait(false);
         }
 
-        private async Task<bool> TryHandleCommandAsync(SocketUserMessage msg, int pos)
+        private async Task TryHandleCommandAsync(SocketUserMessage msg, int pos)
         {
-            // Create a Command Context.
             var context = new SocketCommandContext(_client, msg);
 
-            // Check Permission
+            // "$5 shipping?" starts with the prefix too; only real commands get an answer.
+            if (!_commands.Search(context, pos).IsSuccess)
+                return;
+
             var mgr = Manager;
             if (!mgr.CanUseCommandUser(msg.Author.Id))
-            {
-                await msg.Channel.SendMessageAsync("You are not permitted to use this command.").ConfigureAwait(false);
-                return true;
-            }
+                return;
+
             if (!mgr.CanUseCommandChannel(msg.Channel.Id) && msg.Author.Id != mgr.Owner)
             {
                 await msg.Channel.SendMessageAsync("You can't use that command here.").ConfigureAwait(false);
-                return true;
+                return;
             }
 
-            // Execute the command. (result does not indicate a return value,
-            // rather an object stating if the command executed successfully).
             var guild = msg.Channel is SocketGuildChannel g ? g.Guild.Name : "Unknown Guild";
             await Log(new LogMessage(LogSeverity.Info, "Command", $"Executing command from {guild}#{msg.Channel.Name}:@{msg.Author.Username}. Content: {msg}")).ConfigureAwait(false);
-            var result = await _commands.ExecuteAsync(context, pos, _services).ConfigureAwait(false);
-
-            if (result.Error == CommandError.UnknownCommand)
-                return false;
-
-            // Uncomment the following lines if you want the bot
-            // to send a message if it failed.
-            // This does not catch errors from commands with 'RunMode.Async',
-            // subscribe a handler for '_commands.CommandExecuted' to see those.
-            if (!result.IsSuccess)
-                await msg.Channel.SendMessageAsync(result.ErrorReason).ConfigureAwait(false);
-            return true;
+            await _commands.ExecuteAsync(context, pos, _services).ConfigureAwait(false);
         }
 
-        private async Task MonitorStatusAsync(CancellationToken token)
+        // Raised for sync and async commands alike, so failures from either mode end up here.
+        private static async Task OnCommandExecutedAsync(Optional<CommandInfo> command, ICommandContext context, IResult result)
         {
-            UserStatus state = UserStatus.Idle;
-            while (!token.IsCancellationRequested)
+            if (result.IsSuccess || result.Error == CommandError.UnknownCommand)
+                return;
+
+            if (result is ExecuteResult { Exception: { } ex })
             {
-                var active = UserStatus.Online;
-                if (active != state)
-                {
-                    state = active;
-                    await _client.SetStatusAsync(state).ConfigureAwait(false);
-                }
-                await Task.Delay(20_000, token).ConfigureAwait(false);
+                var name = command.IsSpecified ? command.Value.Name : "unknown";
+                LogUtil.LogError($"Command {name} failed: {ex.Message}", "Discord");
+                LogUtil.LogSafe(ex, "Discord");
+            }
+
+            try
+            {
+                await context.Channel.SendMessageAsync(result.ErrorReason).ConfigureAwait(false);
+            }
+            catch (Exception sendEx)
+            {
+                LogUtil.LogSafe(sendEx, "Discord");
             }
         }
 
@@ -458,6 +444,8 @@ namespace SysBot.Pokemon.Discord
             await Log(new LogMessage(LogSeverity.Info, "LoadLoggingAndEcho()", "Logging and Echo channels loaded!")).ConfigureAwait(false);
             MessageChannelsLoaded = true;
 
+            await _client.SetStatusAsync(UserStatus.Online).ConfigureAwait(false);
+
             var game = Hub.Config.Discord.BotGameStatus;
             if (!string.IsNullOrWhiteSpace(game))
                 await _client.SetGameAsync(game).ConfigureAwait(false);
@@ -467,20 +455,12 @@ namespace SysBot.Pokemon.Discord
         {
             while (!token.IsCancellationRequested)
             {
-                if (_client.ConnectionState == ConnectionState.Disconnected)
+                await Task.Delay(60000, token).ConfigureAwait(false);
+                if (_client.ConnectionState == ConnectionState.Disconnected && !_stoppedForGood)
                 {
                     await Log(new LogMessage(LogSeverity.Warning, "Gateway", "Detected disconnected state, attempting to reconnect...")).ConfigureAwait(false);
-                    try
-                    {
-                        await _client.StartAsync();
-                        await Log(new LogMessage(LogSeverity.Info, "Gateway", "Reconnected successfully")).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        await Log(new LogMessage(LogSeverity.Error, "Gateway", $"Failed to reconnect: {ex.Message}")).ConfigureAwait(false);
-                    }
+                    await TryRestartAsync().ConfigureAwait(false);
                 }
-                await Task.Delay(60000, token); // Check every minute
             }
         }
     }

@@ -20,16 +20,15 @@ namespace SysBot.Pokemon.Discord
         public async Task HelpAsync()
         {
             List<Embed> embeds = new();
+            var prefix = SysCordSettings.Settings.CommandPrefix;
+            var howTo = SysCordSettings.MentionOnly
+                ? $"Start every command by mentioning me, like {Context.Client.CurrentUser.Mention} `ra`. The `{prefix}` prefix only works in DMs right now."
+                : $"Start commands with `{prefix}` or by mentioning me.";
             var builder = new EmbedBuilder
             {
                 Color = new Color(114, 137, 218),
-                Description = "These are the commands you can use:",
+                Description = $"{howTo}\nThese are the commands you can use:",
             };
-
-            var mgr = SysCordSettings.Manager;
-            var app = await Context.Client.GetApplicationInfoAsync().ConfigureAwait(false);
-            var owner = app.Owner.Id;
-            var uid = Context.User.Id;
 
             foreach (var module in _service.Modules)
             {
@@ -37,15 +36,10 @@ namespace SysBot.Pokemon.Discord
                 HashSet<string> mentioned = new();
                 foreach (var cmd in module.Commands)
                 {
-                    var name = cmd.Name;
-                    if (mentioned.Contains(name))
-                        continue;
-                    if (cmd.Attributes.Any(z => z is RequireOwnerAttribute) && owner != uid)
-                        continue;
-                    if (cmd.Attributes.Any(z => z is RequireSudoAttribute) && !mgr.CanUseSudo(uid))
+                    // CheckPreconditionsAsync below already hides owner and sudo commands from everyone else.
+                    if (!mentioned.Add(cmd.Name))
                         continue;
 
-                    mentioned.Add(name);
                     var result = await cmd.CheckPreconditionsAsync(Context).ConfigureAwait(false);
                     if (result.IsSuccess)
                         description += $"{cmd.Aliases[0]}\n";
