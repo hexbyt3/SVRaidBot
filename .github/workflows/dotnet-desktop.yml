@@ -37,9 +37,10 @@ jobs:
             echo "version_changed=true" >> $GITHUB_OUTPUT
           fi
 
+  # Pull requests always build and test; only a version bump pushed to main publishes.
   build:
     needs: version-check
-    if: needs.version-check.outputs.version_changed == 'true'
+    if: github.event_name == 'pull_request' || needs.version-check.outputs.version_changed == 'true'
     runs-on: windows-latest
     env:
       Project_Name: SysBot.Pokemon.WinForms/SysBot.Pokemon.WinForms.csproj
@@ -61,8 +62,10 @@ jobs:
       - name: Test
         run: dotnet test SysBot.Tests/SysBot.Tests.csproj --configuration Release
       - name: Publish
+        if: github.event_name == 'push'
         run: dotnet publish ${{ env.Project_Name }} --configuration Release --output ./publish /p:PublishSingleFile=true /p:SelfContained=true /p:EnableCompressionInSingleFile=true /p:RuntimeIdentifier=win-x64
       - name: Upload build artifacts
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v7
         with:
           name: SVRaidBot
@@ -71,7 +74,7 @@ jobs:
 
   create-release:
     needs: [version-check, build]
-    if: needs.version-check.outputs.version_changed == 'true'
+    if: github.event_name == 'push' && needs.version-check.outputs.version_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

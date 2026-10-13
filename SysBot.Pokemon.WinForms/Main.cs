@@ -7,7 +7,6 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
-using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -23,11 +22,11 @@ namespace SysBot.Pokemon.WinForms
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         internal ProgramConfig Config { get; set; } = null!; // set in InitializeAsync before use
         private IPokeBotRunner RunningEnvironment { get; set; } = null!; // set in InitializeAsync before use
-        public readonly ISwitchConnectionAsync? SwitchConnection;
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public static bool IsUpdating { get; set; } = false;
         private System.Windows.Forms.Timer? _autoSaveTimer;
         private System.Windows.Forms.Timer? _updateCheckTimer;
+        private System.Windows.Forms.Timer? _botMonitorTimer;
         private bool hasUpdate = false;
         private double pulsePhase = 0;
         private Color lastIndicatorColor = Color.Empty;
@@ -38,16 +37,6 @@ namespace SysBot.Pokemon.WinForms
         {
             InitializeComponent();
             Load += async (sender, e) => await InitializeAsync();
-
-            // Initialize dummy controls for compatibility
-            TC_Main = new TabControl { Visible = false };
-            Tab_Bots = new TabPage();
-            Tab_Hub = new TabPage();
-            Tab_Logs = new TabPage();
-            TC_Main.TabPages.AddRange(new[] { Tab_Bots, Tab_Hub, Tab_Logs });
-            comboBox1 = new ComboBox { Visible = false };
-            TC_Main.SendToBack();
-            comboBox1.SendToBack();
         }
 
         private async Task InitializeAsync()
@@ -120,7 +109,7 @@ namespace SysBot.Pokemon.WinForms
             LoadControls();
             Text = $"{(string.IsNullOrEmpty(Config.Hub.BotName) ? "S/V RaidBot" : Config.Hub.BotName)} {SVRaidBot.Version} ({Config.Mode})";
             trayIcon.Text = (Config.Hub.BotName != null && !string.IsNullOrEmpty(Config.Hub.BotName)) ? Config.Hub.BotName : "S/V RaidBot";
-            _ = Task.Run(BotMonitor);
+            StartBotMonitor();
             InitUtil.InitializeStubs(Config.Mode);
             // Start periodic update checks
             StartUpdateCheckTimer();
@@ -151,22 +140,44 @@ namespace SysBot.Pokemon.WinForms
             _ => throw new IndexOutOfRangeException("Unsupported mode."),
         };
 
-        private async Task BotMonitor()
+        // Runs on the UI thread, so the bot rows can be read without racing their own updates.
+        private void StartBotMonitor()
         {
-            while (!Disposing)
+            _botMonitorTimer = new System.Windows.Forms.Timer { Interval = 2_000, Enabled = true };
+            _botMonitorTimer.Tick += (s, e) =>
             {
-                try
-                {
-                    foreach (var c in FLP_Bots.Controls.OfType<BotController>())
-                        c.ReadState();
-                }
-                catch
-                {
-                    // Updating the collection by adding/removing bots will change the iterator
-                    // Can try a for-loop or ToArray, but those still don't prevent concurrent mutations of the array.
-                    // Just try, and if failed, ignore. Next loop will be fine. Locks on the collection are kinda overkill, since this task is not critical.
-                }
-                await Task.Delay(2_000).ConfigureAwait(false);
+                foreach (var c in FLP_Bots.Controls.OfType<BotController>())
+                    c.ReadState();
+            };
+        }
+
+        internal BotSource<PokeBotState>[] BotSources()
+        {
+            var runner = RunningEnvironment;
+            if (runner == null)
+                return [];
+            try
+            {
+                return [.. runner.Bots.Where(b => b != null)];
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+            {
+                return []; // a bot was added or removed mid-copy; the next poll sees it
+            }
+        }
+
+        internal bool RunOnUiThread(Action action)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return false;
+            try
+            {
+                BeginInvoke(action);
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return false; // the window closed in between
             }
         }
 
@@ -200,17 +211,29 @@ namespace SysBot.Pokemon.WinForms
         private void AppendLog(string message, string identity)
         {
             var line = $"[{DateTime.Now:HH:mm:ss}] - {identity}: {message}{Environment.NewLine}";
+            // Never Invoke: closing blocks the UI thread while the bots stop, and a bot
+            // logging on its way out would wait on it until the 10 s limit ran out.
             if (InvokeRequired)
-                Invoke((MethodInvoker)(() => UpdateLog(line)));
+                RunOnUiThread(() => UpdateLog(line));
             else
                 UpdateLog(line);
         }
 
+        private const int MaxLogLines = 100_000;
+        private const int LogLinesToDrop = 25_000;
+
         private void UpdateLog(string line)
         {
-            // ghetto truncate
-            if (RTB_Logs.Lines.Length > 99_999)
-                RTB_Logs.Lines = RTB_Logs.Lines.Skip(25_0000).ToArray();
+            if (RTB_Logs.IsDisposed)
+                return;
+
+            if (RTB_Logs.GetLineFromCharIndex(RTB_Logs.TextLength) >= MaxLogLines)
+            {
+                RTB_Logs.ReadOnly = false;
+                RTB_Logs.Select(0, RTB_Logs.GetFirstCharIndexFromLine(LogLinesToDrop));
+                RTB_Logs.SelectedText = string.Empty;
+                RTB_Logs.ReadOnly = true;
+            }
 
             RTB_Logs.AppendText(line);
             RTB_Logs.ScrollToCaret();
@@ -242,15 +265,7 @@ namespace SysBot.Pokemon.WinForms
                 return;
             }
             this.StopWebServer();
-
-            // Delete the port info file
-            try
-            {
-                string portInfoPath = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath)!, $"SVRaidBot_{Environment.ProcessId}.port");
-                if (File.Exists(portInfoPath))
-                    File.Delete(portInfoPath);
-            }
-            catch { /* Ignore cleanup errors */ }
+            _botMonitorTimer?.Dispose();
 
             if (_autoSaveTimer != null)
             {
@@ -428,20 +443,26 @@ namespace SysBot.Pokemon.WinForms
                 WinFormsUtil.Alert("No bots configured, but all supporting services have been started.");
         }
 
-        private void B_RebootAndStop_Click(object sender, EventArgs e)
+        private async void B_RebootAndStop_Click(object sender, EventArgs e)
         {
             B_Stop_Click(sender, e);
-            Task.Run(async () =>
+            await Task.Delay(3_500);
+            if (IsDisposed)
+                return;
+            try
             {
-                await Task.Delay(3_500).ConfigureAwait(false);
                 SaveCurrentConfig();
                 LogUtil.LogInfo("Restarting all the consoles...", "Form");
                 RunningEnvironment.InitializeStart();
                 SendAll(BotControlCommand.RebootAndStop);
-                Invoke((MethodInvoker)(() => btnNavLogs.PerformClick())); // Switch to logs view
+                btnNavLogs.PerformClick();
                 if (Bots.Count == 0)
                     WinFormsUtil.Alert("No bots configured, but all supporting services have been issued the reboot command.");
-            });
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"Reboot failed: {ex.Message}", "Form");
+            }
         }
 
         private async void Updater_Click(object sender, EventArgs e)
@@ -496,10 +517,10 @@ namespace SysBot.Pokemon.WinForms
                 WinFormsUtil.Alert("No bots configured, but all supporting services have been issued the refresh map command.");
         }
 
-        private void SendAll(BotControlCommand cmd)
+        internal void SendAll(BotControlCommand cmd)
         {
             foreach (var c in FLP_Bots.Controls.OfType<BotController>())
-                c.SendCommand(cmd, false);
+                c.SendCommand(cmd, confirm: false);
 
             LogUtil.LogText($"All bots have been issued a command to {cmd}.");
         }
@@ -559,11 +580,11 @@ namespace SysBot.Pokemon.WinForms
             PokeRoutineExecutorBase newBot;
             try
             {
-                Console.WriteLine($"Current Mode ({Config.Mode}) does not support this type of bot ({cfg.CurrentRoutineType}).");
                 newBot = RunningEnvironment.CreateBotFromConfig(cfg);
             }
-            catch
+            catch (Exception ex)
             {
+                LogUtil.LogError($"Could not create a {cfg.InitialRoutine} bot for {cfg.Connection}: {ex.Message}", "Form");
                 return false;
             }
 

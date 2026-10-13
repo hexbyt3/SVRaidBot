@@ -1,17 +1,16 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Net.Sockets;
+using System.Net.NetworkInformation;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using SysBot.Base;
+using SysBot.Pokemon.SV.BotRaid.Helpers;
 
 namespace SysBot.Pokemon.WinForms.WebApi;
 
@@ -21,52 +20,55 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     private Thread? _listenerThread;
     private readonly int _port = port;
     private readonly int _tcpPort = tcpPort;
-    private readonly CancellationTokenSource _cts = new();
     private readonly Main _mainForm = mainForm ?? throw new ArgumentNullException(nameof(mainForm));
     private volatile bool _running;
-    private string? _htmlTemplate;
+    private readonly Lazy<string> _htmlTemplate = new(() => LoadEmbeddedResource("BotControlPanel.html"));
+    private readonly string[] _machineNames = GetMachineNames();
 
-    private string HtmlTemplate
-    {
-        get
-        {
-            if (_htmlTemplate == null)
-            {
-                _htmlTemplate = LoadEmbeddedResource("BotControlPanel.html");
-            }
-            return _htmlTemplate;
-        }
-    }
+    private static readonly TimeSpan ScanCacheFor = TimeSpan.FromSeconds(2);
+    private readonly object _scanLock = new();
+    private List<BotInstance> _remoteInstances = [];
+    private DateTime _scannedAt = DateTime.MinValue;
 
     private static string LoadEmbeddedResource(string resourceName)
     {
         var assembly = Assembly.GetExecutingAssembly();
         var fullResourceName = assembly.GetManifestResourceNames()
-            .FirstOrDefault(name => name.EndsWith(resourceName, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(name => name.EndsWith(resourceName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new FileNotFoundException($"Embedded resource '{resourceName}' not found.");
 
-        if (string.IsNullOrEmpty(fullResourceName))
-        {
-            throw new FileNotFoundException($"Embedded resource '{resourceName}' not found. Available resources: {string.Join(", ", assembly.GetManifestResourceNames())}");
-        }
-
-        using var stream = assembly.GetManifestResourceStream(fullResourceName);
-        if (stream == null)
-        {
-            throw new FileNotFoundException($"Could not load embedded resource '{fullResourceName}'");
-        }
-
+        using var stream = assembly.GetManifestResourceStream(fullResourceName)
+            ?? throw new FileNotFoundException($"Could not load embedded resource '{fullResourceName}'");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
+    }
+
+    private static string[] GetMachineNames()
+    {
+        var names = new List<string> { Environment.MachineName };
+        try
+        {
+            names.Add(Dns.GetHostName());
+            var properties = IPGlobalProperties.GetIPGlobalProperties();
+            names.Add(properties.HostName);
+            if (!string.IsNullOrWhiteSpace(properties.DomainName))
+                names.Add($"{properties.HostName}.{properties.DomainName}");
+        }
+        catch (Exception ex)
+        {
+            LogUtil.LogError($"Could not read this PC's host names: {ex.Message}", "WebServer");
+        }
+        names.AddRange(names.Select(n => $"{n}.local").ToList());
+        return [.. names.Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase)];
     }
 
     public void Start()
     {
         if (_running) return;
 
+        _listener = new HttpListener();
         try
         {
-            _listener = new HttpListener();
-
             try
             {
                 _listener.Prefixes.Add($"http://+:{_port}/");
@@ -75,31 +77,32 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             }
             catch (HttpListenerException ex) when (ex.ErrorCode == 5)
             {
+                _listener.Close();
                 _listener = new HttpListener();
                 _listener.Prefixes.Add($"http://localhost:{_port}/");
                 _listener.Prefixes.Add($"http://127.0.0.1:{_port}/");
                 _listener.Start();
 
-                LogUtil.LogError($"Web server requires administrator privileges for network access. Currently limited to localhost only.", "WebServer");
+                LogUtil.LogError("Web server requires administrator privileges for network access. Currently limited to localhost only.", "WebServer");
                 LogUtil.LogInfo("To enable network access, either:", "WebServer");
                 LogUtil.LogInfo("1. Run this application as Administrator", "WebServer");
                 LogUtil.LogInfo($"2. Or run this command as admin: netsh http add urlacl url=http://+:{_port}/ user=Everyone", "WebServer");
             }
-
-            _running = true;
-
-            _listenerThread = new Thread(Listen)
-            {
-                IsBackground = true,
-                Name = "BotWebServer"
-            };
-            _listenerThread.Start();
         }
-        catch (Exception ex)
+        catch
         {
-            LogUtil.LogError($"Failed to start web server: {ex.Message}", "WebServer");
+            _listener.Close();
+            _listener = null;
             throw;
         }
+
+        _running = true;
+        _listenerThread = new Thread(Listen)
+        {
+            IsBackground = true,
+            Name = "BotWebServer"
+        };
+        _listenerThread.Start();
     }
 
     public void Stop()
@@ -109,7 +112,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
         try
         {
             _running = false;
-            _cts.Cancel();
             _listener?.Stop();
             _listenerThread?.Join(5000);
         }
@@ -121,59 +123,41 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
 
     private void Listen()
     {
-        while (_running && _listener != null)
+        var listener = _listener!;
+        while (_running)
         {
+            HttpListenerContext context;
             try
             {
-                var asyncResult = _listener.BeginGetContext(null, null);
-
-                while (_running && !asyncResult.AsyncWaitHandle.WaitOne(100))
-                {
-                    // Check if we should continue listening
-                }
-
-                if (!_running)
-                    break;
-
-                var context = _listener.EndGetContext(asyncResult);
-
-                ThreadPool.QueueUserWorkItem(async _ =>
-                {
-                    try
-                    {
-                        await HandleRequest(context);
-                    }
-                    catch (Exception ex)
-                    {
-                        LogUtil.LogError($"Error handling request: {ex.Message}", "WebServer");
-                    }
-                });
+                context = listener.GetContext();
             }
-            catch (HttpListenerException ex) when (!_running || ex.ErrorCode == 995)
-            {
-                break;
-            }
-            catch (ObjectDisposedException) when (!_running)
+            catch (Exception ex) when (!_running || ex is ObjectDisposedException || ex is HttpListenerException { ErrorCode: 995 })
             {
                 break;
             }
             catch (Exception ex)
             {
-                if (_running)
-                {
-                    LogUtil.LogError($"Error in listener: {ex.Message}", "WebServer");
-                }
+                LogUtil.LogError($"Error in listener: {ex.Message}", "WebServer");
+                if (!listener.IsListening)
+                    break;
+                continue;
             }
+
+            _ = Task.Run(() => HandleRequest(context));
         }
     }
 
     private async Task HandleRequest(HttpListenerContext context)
     {
-        HttpListenerResponse? response = null;
+        var request = context.Request;
+        var response = context.Response;
         try
         {
-            var request = context.Request;
-            response = context.Response;
+            if (!PanelRules.IsAllowedHost(request.Headers["Host"], _machineNames))
+            {
+                response.StatusCode = 400;
+                return;
+            }
 
             // The panel is served from this server, so it never needs CORS. Requiring a
             // JSON body on POST stops another web page from driving the bots with a plain
@@ -185,24 +169,34 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
                 response.StatusCode = 405;
                 return;
             }
-            if (request.HttpMethod == "POST" && request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true)
+
+            string body = string.Empty;
+            if (request.HttpMethod == "POST")
             {
-                response.StatusCode = 415;
-                return;
+                if (request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true)
+                {
+                    response.StatusCode = 415;
+                    return;
+                }
+                var read = await PanelRules.ReadBodyAsync(request.InputStream, request.ContentLength64);
+                if (read == null)
+                {
+                    response.StatusCode = 413;
+                    return;
+                }
+                body = read;
             }
 
-            string? responseString = request.Url?.LocalPath switch
+            string? responseString = localPath switch
             {
-                "/" => HtmlTemplate,
+                "/" => _htmlTemplate.Value,
                 "/api/bot/instances" => GetInstances(),
-                var path when path?.StartsWith("/api/bot/instances/") == true && path.EndsWith("/bots") =>
-                    GetBots(ExtractPort(path)),
-                var path when path?.StartsWith("/api/bot/instances/") == true && path.EndsWith("/command") =>
-                    await RunCommand(request, ExtractPort(path)),
-                "/api/bot/command/all" => await RunAllCommand(request),
+                var path when path.StartsWith("/api/bot/instances/") && path.EndsWith("/command") =>
+                    RunCommand(body, ExtractPort(path)),
+                "/api/bot/command/all" => RunAllCommand(body),
                 "/api/bot/update/check" => await CheckForUpdates(),
                 "/api/bot/update/idle-status" => GetIdleStatus(),
-                "/api/bot/update/all" => await UpdateAllInstances(request),
+                "/api/bot/update/all" => await UpdateAllInstances(body),
                 _ => null
             };
 
@@ -214,79 +208,61 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             else
             {
                 response.StatusCode = 200;
-                response.ContentType = request.Url?.LocalPath == "/" ? "text/html" : "application/json";
+                response.ContentType = localPath == "/" ? "text/html" : "application/json";
             }
 
             var buffer = Encoding.UTF8.GetBytes(responseString);
             response.ContentLength64 = buffer.Length;
-
-            try
-            {
-                await response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
-                await response.OutputStream.FlushAsync();
-            }
-            catch (HttpListenerException ex) when (ex.ErrorCode == 64 || ex.ErrorCode == 1229)
-            {
-                return;
-            }
-            catch (ObjectDisposedException)
-            {
-                return;
-            }
-            catch (InvalidOperationException)
-            {
-                return;
-            }
+            await response.OutputStream.WriteAsync(buffer);
+        }
+        catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or InvalidOperationException)
+        {
+            // The browser went away mid-response.
         }
         catch (Exception ex)
         {
             LogUtil.LogError($"Error processing request: {ex.Message}", "WebServer");
-
-            if (response != null && response.OutputStream.CanWrite)
+            try
             {
-                try
-                {
-                    response.StatusCode = 500;
-                }
-                catch { }
+                response.StatusCode = 500;
+            }
+            catch (InvalidOperationException)
+            {
             }
         }
         finally
         {
             try
             {
-                response?.Close();
+                response.Close();
             }
-            catch { }
+            catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or InvalidOperationException)
+            {
+            }
         }
     }
-    private async Task<string> UpdateAllInstances(HttpListenerRequest request)
+
+    private async Task<string> UpdateAllInstances(string body)
     {
         try
         {
-            // Read request body to check for stage parameter
-            using var reader = new StreamReader(request.InputStream);
-            var body = await reader.ReadToEndAsync();
-            var stage = "start"; // default
-
+            var stage = "start";
             if (!string.IsNullOrEmpty(body))
             {
                 try
                 {
                     var requestData = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
-                    if (requestData?.ContainsKey("stage") == true)
-                    {
-                        stage = requestData["stage"];
-                    }
+                    if (requestData?.TryGetValue("stage", out var requested) == true)
+                        stage = requested;
                 }
-                catch { }
+                catch (JsonException)
+                {
+                }
             }
 
             if (stage == "proceed")
             {
-                // Proceed with actual updates after all bots are idle
                 var result = await UpdateManager.ProceedWithUpdatesAsync(_mainForm, _tcpPort);
-
                 return JsonSerializer.Serialize(new
                 {
                     Stage = "updating",
@@ -295,44 +271,34 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
                     result.UpdatesNeeded,
                     result.UpdatesStarted,
                     result.UpdatesFailed,
-                    Results = result.InstanceResults.Select(r => new
-                    {
-                        r.Port,
-                        r.ProcessId,
-                        r.CurrentVersion,
-                        r.LatestVersion,
-                        r.NeedsUpdate,
-                        r.UpdateStarted,
-                        r.Error
-                    })
+                    Results = result.InstanceResults
                 });
             }
-            else
-            {
-                // Start the idle process
-                var result = await UpdateManager.StartUpdateProcessAsync(_mainForm, _tcpPort);
 
-                return JsonSerializer.Serialize(new
-                {
-                    Stage = "idling",
-                    Success = result.UpdatesFailed == 0,
-                    result.TotalInstances,
-                    result.UpdatesNeeded,
-                    Results = result.InstanceResults.Select(r => new
-                    {
-                        r.Port,
-                        r.ProcessId,
-                        r.CurrentVersion,
-                        r.LatestVersion,
-                        r.NeedsUpdate,
-                        r.Error
-                    })
-                });
-            }
+            var started = await UpdateManager.StartUpdateProcessAsync(_mainForm, _tcpPort);
+            return JsonSerializer.Serialize(new
+            {
+                Stage = "idling",
+                Success = started.UpdatesFailed == 0,
+                started.TotalInstances,
+                started.UpdatesNeeded,
+                Results = started.InstanceResults
+            });
         }
         catch (Exception ex)
         {
             return CreateErrorResponse(ex.Message);
+        }
+    }
+
+    internal sealed record IdleBot(string Name, string Status);
+
+    internal sealed record InstanceIdleStatus(int Port, int ProcessId, int TotalBots, int IdleBots, List<IdleBot> NonIdleBots, bool AllIdle)
+    {
+        public static InstanceIdleStatus From(int port, int processId, IReadOnlyCollection<BotInfo> bots)
+        {
+            var busy = bots.Where(b => !PanelRules.IsIdle(b.Status)).Select(b => new IdleBot(b.Name, b.Status)).ToList();
+            return new InstanceIdleStatus(port, processId, bots.Count, bots.Count - busy.Count, busy, busy.Count == 0);
         }
     }
 
@@ -340,104 +306,26 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     {
         try
         {
-            var instances = new List<object>();
+            // While an update waits, only the copies it will update count.
+            var updating = UpdateManager.UpdatingProcessIds;
+            bool counts(int processId) => updating == null || updating.Contains(processId);
 
-            // Local instance
-            var localBots = GetBotControllers();
-            var localIdleCount = 0;
-            var localTotalCount = localBots.Count;
-            var localNonIdleBots = new List<object>();
+            var instances = new List<InstanceIdleStatus>();
+            if (counts(Environment.ProcessId))
+                instances.Add(InstanceIdleStatus.From(_tcpPort, Environment.ProcessId, LocalBots()));
 
-            foreach (var controller in localBots)
+            foreach (var instance in ScanRemoteInstances().Where(i => i.IsOnline && counts(i.ProcessId)))
             {
-                var status = controller.ReadBotState();
-                var upperStatus = status?.ToUpper() ?? "";
-
-                if (upperStatus == "IDLE" || upperStatus == "STOPPED")
-                {
-                    localIdleCount++;
-                }
-                else
-                {
-                    localNonIdleBots.Add(new
-                    {
-                        Name = GetBotName(controller.State, GetConfig()),
-                        Status = status
-                    });
-                }
+                if (TryListBots(instance.Port, out var bots))
+                    instances.Add(InstanceIdleStatus.From(instance.Port, instance.ProcessId, bots));
             }
-
-            instances.Add(new
-            {
-                Port = _tcpPort,
-                Environment.ProcessId,
-                TotalBots = localTotalCount,
-                IdleBots = localIdleCount,
-                NonIdleBots = localNonIdleBots,
-                AllIdle = localIdleCount == localTotalCount
-            });
-
-            // Remote instances
-            var remoteInstances = ScanRemoteInstances().Where(i => i.IsOnline);
-            foreach (var instance in remoteInstances)
-            {
-                var botsResponse = QueryRemote(instance.Port, "LISTBOTS");
-                if (botsResponse.StartsWith("{") && botsResponse.Contains("Bots"))
-                {
-                    try
-                    {
-                        var botsData = JsonSerializer.Deserialize<Dictionary<string, List<Dictionary<string, object>>>>(botsResponse);
-                        if (botsData?.ContainsKey("Bots") == true)
-                        {
-                            var bots = botsData["Bots"];
-                            var idleCount = 0;
-                            var nonIdleBots = new List<object>();
-
-                            foreach (var bot in bots)
-                            {
-                                if (bot.TryGetValue("Status", out var status))
-                                {
-                                    var statusStr = status?.ToString()?.ToUpperInvariant() ?? "";
-                                    if (statusStr == "IDLE" || statusStr == "STOPPED")
-                                    {
-                                        idleCount++;
-                                    }
-                                    else
-                                    {
-                                        nonIdleBots.Add(new
-                                        {
-                                            Name = bot.TryGetValue("Name", out var name) ? name?.ToString() : "Unknown",
-                                            Status = statusStr
-                                        });
-                                    }
-                                }
-                            }
-
-                            instances.Add(new
-                            {
-                                instance.Port,
-                                instance.ProcessId,
-                                TotalBots = bots.Count,
-                                IdleBots = idleCount,
-                                NonIdleBots = nonIdleBots,
-                                AllIdle = idleCount == bots.Count
-                            });
-                        }
-                    }
-                    catch { }
-                }
-            }
-
-            var totalBots = instances.Sum(i => (int)((dynamic)i).TotalBots);
-            var totalIdle = instances.Sum(i => (int)((dynamic)i).IdleBots);
-            var allInstancesIdle = instances.All(i => (bool)((dynamic)i).AllIdle);
 
             return JsonSerializer.Serialize(new
             {
                 Instances = instances,
-                TotalBots = totalBots,
-                TotalIdleBots = totalIdle,
-                AllBotsIdle = allInstancesIdle
+                TotalBots = instances.Sum(i => i.TotalBots),
+                TotalIdleBots = instances.Sum(i => i.IdleBots),
+                AllBotsIdle = instances.All(i => i.AllIdle)
             });
         }
         catch (Exception ex)
@@ -446,18 +334,16 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
         }
     }
 
-    private async Task<string> CheckForUpdates()
+    private static async Task<string> CheckForUpdates()
     {
         try
         {
-            var (updateAvailable, _, latestVersion) = await UpdateChecker.CheckForUpdatesAsync(false);
-            var changelog = await UpdateChecker.FetchChangelogAsync();
-
+            var latest = await UpdateChecker.GetLatestAsync();
             return JsonSerializer.Serialize(new
             {
-                version = latestVersion,
-                changelog,
-                available = updateAvailable
+                version = latest?.Tag ?? "Unknown",
+                changelog = latest?.Body ?? "Failed to fetch the latest release information.",
+                available = latest != null && UpdateRules.IsNewer(latest.Tag, SVRaidBot.Version)
             });
         }
         catch (Exception ex)
@@ -478,222 +364,104 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
         return parts.Length > 4 && int.TryParse(parts[4], out var port) ? port : 0;
     }
 
+    public static string InstanceName(ProgramConfig? config) =>
+        string.IsNullOrEmpty(config?.Hub?.BotName) ? "SVRaidBot" : config.Hub.BotName;
+
+    private List<BotInfo> LocalBots() => [.. _mainForm.BotSources().Select(BotInfo.From)];
+
     private string GetInstances()
     {
-        var instances = new List<BotInstance>
-        {
-            CreateLocalInstance()
-        };
-
+        var instances = new List<BotInstance> { CreateLocalInstance() };
         instances.AddRange(ScanRemoteInstances());
-
         return JsonSerializer.Serialize(new { Instances = instances });
     }
 
     private BotInstance CreateLocalInstance()
     {
-        var config = GetConfig();
-        var controllers = GetBotControllers();
-
-        var mode = config?.Mode.ToString() ?? "Unknown";
-        var name = config?.Hub?.BotName ?? "SVRaidBot";
-
-        var version = "Unknown";
-        try
-        {
-            var svRaidBotType = Type.GetType("SysBot.Pokemon.SV.BotRaid.Helpers.SVRaidBot, SysBot.Pokemon");
-            if (svRaidBotType != null)
-            {
-                var versionField = svRaidBotType.GetField("Version",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                if (versionField != null)
-                {
-                    version = versionField.GetValue(null)?.ToString() ?? "Unknown";
-                }
-            }
-
-            if (version == "Unknown")
-            {
-                version = _mainForm.GetType().Assembly.GetName().Version?.ToString() ?? "1.0.0";
-            }
-        }
-        catch
-        {
-            version = _mainForm.GetType().Assembly.GetName().Version?.ToString() ?? "1.0.0";
-        }
-
-        var botStatuses = controllers.Select(c => new BotStatusInfo
-        {
-            Name = GetBotName(c.State, config),
-            Status = c.ReadBotState()
-        }).ToList();
-
+        var config = _mainForm.Config;
+        var bots = LocalBots();
         return new BotInstance
         {
             ProcessId = Environment.ProcessId,
-            Name = name,
+            Name = InstanceName(config),
             Port = _tcpPort,
-            Version = version,
-            Mode = mode,
-            BotCount = botStatuses.Count,
+            Version = SVRaidBot.Version,
+            Mode = config?.Mode.ToString() ?? "Unknown",
+            BotCount = bots.Count,
             IsOnline = true,
-            IsMaster = true,
-            BotStatuses = botStatuses
+            BotStatuses = [.. bots.Select(b => new BotStatusInfo { Name = b.Name, Status = b.Status })]
         };
     }
 
-    private static List<BotInstance> ScanRemoteInstances()
+    // The panel and the update screens poll this every few seconds; asking every
+    // copy over TCP each time is wasted work when nothing could have changed.
+    private List<BotInstance> ScanRemoteInstances()
     {
-        var instances = new List<BotInstance>();
-        var currentPid = Environment.ProcessId;
-
-        try
+        lock (_scanLock)
         {
-            var processNames = new[] { "SVRaidBot", "SysBot.Pokemon.WinForms", "SysBot" };
-            var processes = processNames
-                .SelectMany(name => Process.GetProcessesByName(name))
-                .Where(p => p.Id != currentPid)
-                .Distinct();
+            if (DateTime.UtcNow - _scannedAt < ScanCacheFor)
+                return _remoteInstances;
 
-            foreach (var process in processes)
-            {
-                var instance = TryCreateInstance(process);
-                if (instance != null)
-                    instances.Add(instance);
-            }
+            _remoteInstances = [.. InstanceDiscovery.FindOthers().Select(c => DescribeCopy(c.ProcessId, c.Port))];
+            _scannedAt = DateTime.UtcNow;
+            return _remoteInstances;
         }
-        catch (Exception ex)
-        {
-            LogUtil.LogError($"Error scanning remote instances: {ex.Message}", "WebServer");
-        }
-
-        return instances;
     }
 
-    private static BotInstance? TryCreateInstance(Process process)
+    private static BotInstance DescribeCopy(int processId, int port)
     {
-        try
+        var instance = new BotInstance
         {
-            var exePath = process.MainModule?.FileName;
-            if (string.IsNullOrEmpty(exePath))
-                return null;
+            ProcessId = processId,
+            Name = "SVRaidBot",
+            Port = port,
+            Version = "Unknown",
+            Mode = "Unknown",
+        };
 
-            var portFile = Path.Combine(Path.GetDirectoryName(exePath)!, $"SVRaidBot_{process.Id}.port");
-            if (!File.Exists(portFile))
-                return null;
-
-            var portText = File.ReadAllText(portFile).Trim();
-            if (portText.StartsWith("ERROR:") || !int.TryParse(portText, out var port))
-                return null;
-
-            var isOnline = IsPortOpen(port);
-            var instance = new BotInstance
-            {
-                ProcessId = process.Id,
-                Name = "SVRaidBot",
-                Port = port,
-                Version = "Unknown",
-                Mode = "Unknown",
-                BotCount = 0,
-                IsOnline = isOnline
-            };
-
-            if (isOnline)
-            {
-                UpdateInstanceInfo(instance, port);
-            }
-
+        var info = InstanceDiscovery.Query(port, "INFO");
+        if (!info.StartsWith('{'))
             return instance;
-        }
-        catch
-        {
-            return null;
-        }
-    }
 
-    private static void UpdateInstanceInfo(BotInstance instance, int port)
-    {
+        instance.IsOnline = true;
         try
         {
-            var infoResponse = QueryRemote(port, "INFO");
-            if (infoResponse.StartsWith("{"))
-            {
-                using var doc = JsonDocument.Parse(infoResponse);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("Version", out var version))
-                    instance.Version = version.GetString() ?? "Unknown";
-
-                if (root.TryGetProperty("Mode", out var mode))
-                    instance.Mode = mode.GetString() ?? "Unknown";
-
-                if (root.TryGetProperty("Name", out var name))
-                    instance.Name = name.GetString() ?? "SVRaidBot";
-            }
-
-            var botsResponse = QueryRemote(port, "LISTBOTS");
-            if (botsResponse.StartsWith("{") && botsResponse.Contains("Bots"))
-            {
-                var botsData = JsonSerializer.Deserialize<Dictionary<string, List<BotInfo>>>(botsResponse);
-                if (botsData?.ContainsKey("Bots") == true)
-                {
-                    instance.BotCount = botsData["Bots"].Count;
-                    instance.BotStatuses = [.. botsData["Bots"].Select(b => new BotStatusInfo
-                    {
-                        Name = b.Name,
-                        Status = b.Status
-                    })];
-                }
-            }
+            using var doc = JsonDocument.Parse(info);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("Version", out var version))
+                instance.Version = version.GetString() ?? "Unknown";
+            if (root.TryGetProperty("Mode", out var mode))
+                instance.Mode = mode.GetString() ?? "Unknown";
+            if (root.TryGetProperty("Name", out var name))
+                instance.Name = name.GetString() ?? "SVRaidBot";
         }
-        catch { }
+        catch (JsonException)
+        {
+        }
+
+        if (TryListBots(port, out var bots))
+        {
+            instance.BotCount = bots.Count;
+            instance.BotStatuses = [.. bots.Select(b => new BotStatusInfo { Name = b.Name, Status = b.Status })];
+        }
+        return instance;
     }
 
-    private static bool IsPortOpen(int port)
+    private static bool TryListBots(int port, out List<BotInfo> bots)
     {
-        try
-        {
-            using var client = new TcpClient();
-            var result = client.BeginConnect("127.0.0.1", port, null, null);
-            var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromMilliseconds(200));
-            if (success)
-            {
-                client.EndConnect(result);
-                return true;
-            }
+        bots = [];
+        var response = InstanceDiscovery.Query(port, "LISTBOTS");
+        if (!response.StartsWith('{'))
             return false;
+        try
+        {
+            bots = JsonSerializer.Deserialize<BotList>(response)?.Bots ?? [];
+            return true;
         }
-        catch
+        catch (JsonException)
         {
             return false;
         }
-    }
-
-    private string GetBots(int port)
-    {
-        if (port == _tcpPort)
-        {
-            var config = GetConfig();
-            var controllers = GetBotControllers();
-
-            var bots = controllers.Select(c => new BotInfo
-            {
-                Id = $"{c.State.Connection.IP}:{c.State.Connection.Port}",
-                Name = GetBotName(c.State, config),
-                RoutineType = c.State.InitialRoutine.ToString(),
-                Status = c.ReadBotState(),
-                ConnectionType = c.State.Connection.Protocol.ToString(),
-                IP = c.State.Connection.IP,
-                Port = c.State.Connection.Port
-            }).ToList();
-
-            return JsonSerializer.Serialize(new { Bots = bots });
-        }
-
-        if (!IsKnownInstance(port))
-            return CreateErrorResponse("Unknown instance");
-
-        return QueryRemote(port, "LISTBOTS");
     }
 
     private static readonly HashSet<string> PanelCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -701,134 +469,90 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
         "start", "stop", "idle", "resume", "restart", "reboot", "refreshmap", "screenon", "screenoff",
     };
 
-    private static bool IsKnownInstance(int port) => ScanRemoteInstances().Any(i => i.Port == port);
+    private bool IsKnownInstance(int port) => ScanRemoteInstances().Any(i => i.Port == port);
 
-    private async Task<string> RunCommand(HttpListenerRequest request, int port)
+    private static BotCommandRequest? ReadCommand(string body)
     {
         try
         {
-            using var reader = new StreamReader(request.InputStream);
-            var body = await reader.ReadToEndAsync();
-            var commandRequest = JsonSerializer.Deserialize<BotCommandRequest>(body);
+            var request = JsonSerializer.Deserialize<BotCommandRequest>(body);
+            return request != null && PanelCommands.Contains(request.Command) ? request : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
-            if (commandRequest == null || !PanelCommands.Contains(commandRequest.Command))
-                return CreateErrorResponse("Invalid command request");
+    private string RunCommand(string body, int port)
+    {
+        var commandRequest = ReadCommand(body);
+        if (commandRequest == null)
+            return CreateErrorResponse("Invalid command request");
 
-            if (port == _tcpPort)
-            {
-                return RunLocalCommand(commandRequest.Command);
-            }
+        if (port == _tcpPort)
+            return JsonSerializer.Serialize(RunLocalCommand(commandRequest.Command));
 
-            if (!IsKnownInstance(port))
-                return CreateErrorResponse("Unknown instance");
+        if (!IsKnownInstance(port))
+            return CreateErrorResponse("Unknown instance");
 
-            var tcpCommand = $"{commandRequest.Command}All".ToUpper();
-            var result = QueryRemote(port, tcpCommand);
+        var result = InstanceDiscovery.Query(port, $"{commandRequest.Command}All".ToUpperInvariant());
+        return JsonSerializer.Serialize(new CommandResponse
+        {
+            Success = !result.StartsWith("ERROR"),
+            Message = result,
+            Port = port,
+            Command = commandRequest.Command,
+        });
+    }
 
-            return JsonSerializer.Serialize(new CommandResponse
+    private string RunAllCommand(string body)
+    {
+        var commandRequest = ReadCommand(body);
+        if (commandRequest == null)
+            return CreateErrorResponse("Invalid command request");
+
+        var local = RunLocalCommand(commandRequest.Command);
+        local.InstanceName = InstanceName(_mainForm.Config);
+        var results = new List<CommandResponse> { local };
+
+        foreach (var instance in ScanRemoteInstances().Where(i => i.IsOnline))
+        {
+            var result = InstanceDiscovery.Query(instance.Port, $"{commandRequest.Command}All".ToUpperInvariant());
+            results.Add(new CommandResponse
             {
                 Success = !result.StartsWith("ERROR"),
                 Message = result,
-                Port = port,
+                Port = instance.Port,
                 Command = commandRequest.Command,
-                Timestamp = DateTime.Now
+                InstanceName = instance.Name
             });
         }
-        catch (Exception ex)
+
+        return JsonSerializer.Serialize(new BatchCommandResponse
         {
-            return CreateErrorResponse(ex.Message);
-        }
+            Results = results,
+            TotalInstances = results.Count,
+            SuccessfulCommands = results.Count(r => r.Success)
+        });
     }
 
-    private async Task<string> RunAllCommand(HttpListenerRequest request)
+    private CommandResponse RunLocalCommand(string command)
     {
-        try
+        var cmd = MapCommand(command);
+        bool sent = cmd != BotControlCommand.None && _mainForm.RunOnUiThread(() => _mainForm.SendAll(cmd));
+        return new CommandResponse
         {
-            using var reader = new StreamReader(request.InputStream);
-            var body = await reader.ReadToEndAsync();
-            var commandRequest = JsonSerializer.Deserialize<BotCommandRequest>(body);
-
-            if (commandRequest == null || !PanelCommands.Contains(commandRequest.Command))
-                return CreateErrorResponse("Invalid command request");
-
-            var results = new List<CommandResponse>();
-
-            var localResult = JsonSerializer.Deserialize<CommandResponse>(RunLocalCommand(commandRequest.Command));
-            if (localResult != null)
-            {
-                localResult.InstanceName = _mainForm.Text;
-                results.Add(localResult);
-            }
-
-            var remoteInstances = ScanRemoteInstances().Where(i => i.IsOnline);
-            foreach (var instance in remoteInstances)
-            {
-                try
-                {
-                    var result = QueryRemote(instance.Port, $"{commandRequest.Command}All".ToUpper());
-                    results.Add(new CommandResponse
-                    {
-                        Success = !result.StartsWith("ERROR"),
-                        Message = result,
-                        Port = instance.Port,
-                        Command = commandRequest.Command,
-                        InstanceName = instance.Name
-                    });
-                }
-                catch { }
-            }
-
-            return JsonSerializer.Serialize(new BatchCommandResponse
-            {
-                Results = results,
-                TotalInstances = results.Count,
-                SuccessfulCommands = results.Count(r => r.Success)
-            });
-        }
-        catch (Exception ex)
-        {
-            return CreateErrorResponse(ex.Message);
-        }
-    }
-
-    private string RunLocalCommand(string command)
-    {
-        try
-        {
-            var cmd = MapCommand(command);
-
-            _mainForm.BeginInvoke((System.Windows.Forms.MethodInvoker)(() =>
-            {
-                var sendAllMethod = _mainForm.GetType().GetMethod("SendAll",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                sendAllMethod?.Invoke(_mainForm, new object[] { cmd });
-            }));
-
-            return JsonSerializer.Serialize(new CommandResponse
-            {
-                Success = true,
-                Message = $"Command {command} sent successfully",
-                Port = _tcpPort,
-                Command = command,
-                Timestamp = DateTime.Now
-            });
-        }
-        catch
-        {
-            return JsonSerializer.Serialize(new CommandResponse
-            {
-                Success = true,
-                Message = $"Command {command} sent successfully",
-                Port = _tcpPort,
-                Command = command,
-                Timestamp = DateTime.Now
-            });
-        }
+            Success = sent,
+            Message = sent ? $"Command {command} sent successfully" : $"Error: command {command} could not be sent",
+            Port = _tcpPort,
+            Command = command,
+        };
     }
 
     private static BotControlCommand MapCommand(string webCommand)
     {
-        return webCommand.ToLower() switch
+        return webCommand.ToLowerInvariant() switch
         {
             "start" => BotControlCommand.Start,
             "stop" => BotControlCommand.Stop,
@@ -841,52 +565,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             "screenoff" => BotControlCommand.ScreenOffAll,
             _ => BotControlCommand.None
         };
-    }
-
-    public static string QueryRemote(int port, string command)
-    {
-        try
-        {
-            using var client = new TcpClient { ReceiveTimeout = 5000, SendTimeout = 5000 };
-            if (!client.ConnectAsync("127.0.0.1", port).Wait(TimeSpan.FromSeconds(2)))
-                return "Failed to connect";
-
-            using var stream = client.GetStream();
-            using var writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-
-            writer.WriteLine(command);
-            return reader.ReadLine() ?? "No response";
-        }
-        catch
-        {
-            return "Failed to connect";
-        }
-    }
-
-    private List<BotController> GetBotControllers()
-    {
-        var flpBotsField = _mainForm.GetType().GetField("FLP_Bots",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-        if (flpBotsField?.GetValue(_mainForm) is FlowLayoutPanel flpBots)
-        {
-            return [.. flpBots.Controls.OfType<BotController>()];
-        }
-
-        return new List<BotController>();
-    }
-
-    private ProgramConfig? GetConfig()
-    {
-        var configProp = _mainForm.GetType().GetProperty("Config",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        return configProp?.GetValue(_mainForm) as ProgramConfig;
-    }
-
-    private static string GetBotName(PokeBotState state, ProgramConfig? config)
-    {
-        return state.Connection.IP;
     }
 
     private static string CreateErrorResponse(string message)
@@ -902,7 +580,7 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     {
         Stop();
         _listener?.Close();
-        _cts?.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
 
@@ -915,7 +593,6 @@ public class BotInstance
     public int BotCount { get; set; }
     public string Mode { get; set; } = string.Empty;
     public bool IsOnline { get; set; }
-    public bool IsMaster { get; set; }
     public List<BotStatusInfo>? BotStatuses { get; set; }
 }
 
@@ -924,6 +601,8 @@ public class BotStatusInfo
     public string Name { get; set; } = string.Empty;
     public string Status { get; set; } = string.Empty;
 }
+
+public record BotList(List<BotInfo> Bots);
 
 public class BotInfo
 {
@@ -934,12 +613,27 @@ public class BotInfo
     public string ConnectionType { get; set; } = string.Empty;
     public string IP { get; set; } = string.Empty;
     public int Port { get; set; }
+
+    public static BotInfo From(BotSource<PokeBotState> source)
+    {
+        var state = source.Bot.Config;
+        var connection = state.Connection;
+        return new BotInfo
+        {
+            Id = $"{connection.IP}:{connection.Port}",
+            Name = connection.IP,
+            RoutineType = state.InitialRoutine.ToString(),
+            Status = BotStatus.Read(source),
+            ConnectionType = connection.Protocol.ToString(),
+            IP = connection.IP,
+            Port = connection.Port
+        };
+    }
 }
 
 public class BotCommandRequest
 {
     public string Command { get; set; } = string.Empty;
-    public string? BotId { get; set; }
 }
 
 public class CommandResponse

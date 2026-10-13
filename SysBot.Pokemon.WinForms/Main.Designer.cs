@@ -50,7 +50,6 @@ namespace SysBot.Pokemon.WinForms
             sidebarPanel = new Panel();
             contentPanel = new Panel();
             headerPanel = new Panel();
-            particlePanel = new Panel(); // Background particles
 
             // Sidebar Components
             logoPanel = new Panel();
@@ -132,13 +131,6 @@ namespace SysBot.Pokemon.WinForms
                     ControlStyles.ResizeRedraw |
                     ControlStyles.OptimizedDoubleBuffer, true);
             UpdateStyles();
-
-            // Particle Background Panel - DISABLED to prevent flickering
-            // particlePanel.Dock = DockStyle.Fill;
-            // particlePanel.BackColor = Color.Transparent;
-            // particlePanel.SendToBack();
-            // particlePanel.Paint += ParticlePanel_Paint;
-            // Controls.Add(particlePanel);
 
             // Main Layout Panel
             mainLayoutPanel.ColumnCount = 2;
@@ -667,8 +659,6 @@ namespace SysBot.Pokemon.WinForms
             logsContainer.Controls.Add(RTB_Logs);
 
             Controls.Add(mainLayoutPanel);
-            // Particle panel removed to prevent flickering
-            // Controls.Add(particlePanel);
 
             // Configure Tray Icon
             ConfigureTrayIcon();
@@ -700,7 +690,6 @@ namespace SysBot.Pokemon.WinForms
             EnableDoubleBuffering(sidebarPanel);
             EnableDoubleBuffering(contentPanel);
             EnableDoubleBuffering(headerPanel);
-            EnableDoubleBuffering(particlePanel);
             EnableDoubleBuffering(botsPanel);
             EnableDoubleBuffering(hubPanel);
             EnableDoubleBuffering(logsPanel);
@@ -1430,28 +1419,6 @@ namespace SysBot.Pokemon.WinForms
             return count;
         }
 
-        private void ParticlePanel_Paint(object sender, PaintEventArgs e)
-        {
-            // Disabled to prevent flickering
-        }
-
-        private void FLP_Bots_Paint(object sender, PaintEventArgs e)
-        {
-            if (FLP_Bots.Controls.Count == 0)
-            {
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-
-                using var font = new Font("Segoe UI", 14F, FontStyle.Regular);
-                using var brush = new SolidBrush(Color.FromArgb(100, 176, 176, 176));
-                var text = "No bots configured. Add a bot using the form above.";
-                var size = e.Graphics.MeasureString(text, font);
-                e.Graphics.DrawString(text, font, brush,
-                    (FLP_Bots.Width - size.Width) / 2,
-                    100);
-            }
-        }
-
         private void UpdateStatusIndicatorPulse()
         {
             // Throttle updates to reduce flickering
@@ -1506,9 +1473,11 @@ namespace SysBot.Pokemon.WinForms
             }
         }
 
-        // Also update the AnimationTimer_Tick method to be more efficient:
         private void AnimationTimer_Tick(object sender, EventArgs e)
         {
+            if (!Visible || WindowState == FormWindowState.Minimized)
+                return;
+
             var controlsToUpdate = new List<Control>();
 
             // Update hover animations only for controls that need it
@@ -1629,24 +1598,11 @@ namespace SysBot.Pokemon.WinForms
         private TextBox logSearchBox;
         private Label searchStatusLabel;
         private Button btnClearLogs;
-        private Panel particlePanel;
         private Panel statusIndicator;
         private System.Windows.Forms.Timer animationTimer;
         private NotifyIcon trayIcon;
         private ContextMenuStrip trayContextMenu;
         private bool isExiting = false;
         private LinearGradientBrush _logoBrush;
-
-        // Compatibility aliases
-        private Button updater => btnUpdate;
-        private Button B_Start => btnStart;
-        private Button B_Stop => btnStop;
-        private Button B_RebootAndStop => btnReboot;
-        private Button B_RefreshMap => btnRefreshMap;
-        private TabControl TC_Main;
-        private TabPage Tab_Bots;
-        private TabPage Tab_Hub;
-        private TabPage Tab_Logs;
-        private ComboBox comboBox1;
     }
 }

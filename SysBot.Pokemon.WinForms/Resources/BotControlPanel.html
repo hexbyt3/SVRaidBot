@@ -1321,6 +1321,7 @@
             newVersion: '',
             changelog: '',
             instances: [],
+            masterProcessId: null,
             idleCheckInterval: null,
             countdownInterval: null,
             startTime: null,
@@ -1337,6 +1338,7 @@
                 newVersion: '',
                 changelog: '',
                 instances: [],
+                masterProcessId: null,
                 idleCheckInterval: null,
                 countdownInterval: null,
                 startTime: null,
@@ -1349,6 +1351,8 @@
                 const instancesResponse = await fetch(`${API_BASE}/instances`);
                 const instancesData = await instancesResponse.json();
                 const currentVersion = instancesData.Instances?.[0]?.Version || 'Unknown';
+                // The first instance is always the copy serving this page.
+                updateState.masterProcessId = instancesData.Instances?.[0]?.ProcessId ?? null;
 
                 document.getElementById('current-version').textContent = currentVersion;
                 document.getElementById('new-version').textContent = 'Checking...';
@@ -1627,13 +1631,11 @@
                         });
                     }
 
-                    // Check for master update
-                    const masterPort = parseInt(window.location.port || '8080');
-                    const masterUpdating = result.Results?.some(r =>
-                        r.UpdateStarted && r.Port === masterPort
+                    const servingCopyUpdating = result.Results?.some(r =>
+                        r.UpdateStarted && r.ProcessId === updateState.masterProcessId
                     );
 
-                    if (masterUpdating) {
+                    if (servingCopyUpdating) {
                         masterUpdating = true;
                         setTimeout(() => {
                             updateProgress(
@@ -1659,6 +1661,11 @@
                             }, 2000);
                         }, 3000);
                     }
+                } else {
+                    updateProgress('Update failed', 'No instance could be updated', 0);
+                    (result.Results || []).forEach(r => {
+                        if (r.Error) addLogEntry(`Port ${r.Port}: ${r.Error}`, 'error');
+                    });
                 }
             } catch (error) {
                 console.error('Error proceeding with updates:', error);
@@ -1723,8 +1730,12 @@
         let reconnectInterval = null;
         let masterUpdating = false;
 
+        // Only needed while an update runs, to notice the serving copy restarting.
         function startConnectionMonitor() {
             setInterval(async () => {
+                if (!connectionLost && !document.getElementById('progress-modal').classList.contains('show')) {
+                    return;
+                }
                 try {
                     const response = await fetch(`${API_BASE}/instances`, {
                         method: 'GET',

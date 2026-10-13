@@ -1,9 +1,10 @@
-﻿using System;
-using System.Collections.Generic;
+using System;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -22,7 +23,7 @@ public static class WebApiExtensions
     private static Main? _main;
 
     private const int WebPort = 9090;
-    private static int _tcpPort = 0;
+    private static int _tcpPort;
 
     public static void InitWebServer(this Main mainForm)
     {
@@ -30,107 +31,86 @@ public static class WebApiExtensions
 
         try
         {
-            if (IsPortInUse(WebPort))
-            {
-                _tcpPort = FindAvailablePort(9091);
-                StartTcpOnly();
-
-                // Start monitoring for master failure
-                StartMasterMonitor();
-                return;
-            }
-
-            // Try to add URL reservation for network access
-            TryAddUrlReservation(WebPort);
-
-            _tcpPort = FindAvailablePort(9091);
-            StartFullServer();
+            StartTcp();
         }
         catch (Exception ex)
         {
-            LogUtil.LogError($"Failed to initialize web server: {ex.Message}", "WebServer");
+            LogUtil.LogError($"Could not open the control port for the web panel: {ex.Message}", "WebServer");
+            return;
+        }
+
+        // The port file is written only once the port is really ours.
+        InstanceDiscovery.Register(_tcpPort);
+        AppDomain.CurrentDomain.ProcessExit -= OnProcessExit;
+        AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
+
+        // Another copy already serves the panel, or 9090 belongs to something else; either
+        // way this copy stays reachable through it and takes over if 9090 frees up.
+        if (InstanceDiscovery.IsListening(WebPort, 500) || !TryStartWebServer())
+            StartMasterMonitor();
+    }
+
+    private static void OnProcessExit(object? sender, EventArgs e) => InstanceDiscovery.Unregister();
+
+    private static bool TryStartWebServer()
+    {
+        TryAddUrlReservation(WebPort);
+        var server = new BotServer(_main!, WebPort, _tcpPort);
+        try
+        {
+            server.Start();
+            _server = server;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogUtil.LogError($"Could not start the web panel on port {WebPort}: {ex.Message}", "WebServer");
+            server.Dispose();
+            return false;
         }
     }
 
     private static void StartMasterMonitor()
     {
-        _monitorCts = new CancellationTokenSource();
+        var cts = new CancellationTokenSource();
+        _monitorCts = cts;
 
         Task.Run(async () =>
         {
             var random = new Random();
-
-            while (!_monitorCts.Token.IsCancellationRequested)
+            while (!cts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    // Check every 10-15 seconds (randomized to prevent race conditions)
-                    await Task.Delay(10000 + random.Next(5000), _monitorCts.Token);
+                    // Randomized so several copies don't all try to take over at once.
+                    await Task.Delay(10_000 + random.Next(5_000), cts.Token);
+                    if (InstanceDiscovery.IsListening(WebPort, 500))
+                        continue;
 
-                    if (!IsPortInUse(WebPort))
-                    {
-                        LogUtil.LogInfo("Master web server is down. Attempting to take over...", "WebServer");
+                    LogUtil.LogInfo("The web panel on port 9090 is down. Trying to take it over...", "WebServer");
+                    await Task.Delay(random.Next(1_000, 3_000), cts.Token);
+                    if (InstanceDiscovery.IsListening(WebPort, 500) || !TryStartWebServer())
+                        continue;
 
-                        // Wait a random amount to reduce race conditions between multiple slaves
-                        await Task.Delay(random.Next(1000, 3000));
-
-                        // Double-check that no one else took over
-                        if (!IsPortInUse(WebPort))
-                        {
-                            TryTakeOverAsMaster();
-                            break; // Stop monitoring once we've taken over
-                        }
-                    }
+                    LogUtil.LogInfo($"This copy now serves the web panel at http://localhost:{WebPort}", "WebServer");
+                    _main?.RunOnUiThread(() => MessageBox.Show(
+                        $"This instance has taken over as the master web server.\n\nWeb interface available at:\nhttp://localhost:{WebPort}",
+                        "Master Server Takeover", MessageBoxButtons.OK, MessageBoxIcon.Information));
+                    return;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex)
                 {
                     LogUtil.LogError($"Error in master monitor: {ex.Message}", "WebServer");
                 }
             }
-        }, _monitorCts.Token);
+        });
     }
 
-    private static void TryTakeOverAsMaster()
-    {
-        try
-        {
-            // Try to add URL reservation
-            TryAddUrlReservation(WebPort);
-
-            // Start the web server
-            _server = new BotServer(_main!, WebPort, _tcpPort);
-            _server.Start();
-
-            // Stop the monitor since we're now the master
-            _monitorCts?.Cancel();
-            _monitorCts = null;
-
-            LogUtil.LogInfo($"Successfully took over as master web server on port {WebPort}", "WebServer");
-            LogUtil.LogInfo($"Web interface is now available at http://localhost:{WebPort}", "WebServer");
-
-            // Show notification to user if possible
-            if (_main != null)
-            {
-                _main.BeginInvoke((MethodInvoker)(() =>
-                {
-                    System.Windows.Forms.MessageBox.Show(
-                        $"This instance has taken over as the master web server.\n\nWeb interface available at:\nhttp://localhost:{WebPort}",
-                        "Master Server Takeover",
-                        System.Windows.Forms.MessageBoxButtons.OK,
-                        System.Windows.Forms.MessageBoxIcon.Information);
-                }));
-            }
-        }
-        catch (Exception ex)
-        {
-            LogUtil.LogError($"Failed to take over as master: {ex.Message}", "WebServer");
-
-            // If we failed, go back to monitoring
-            StartMasterMonitor();
-        }
-    }
-
-    private static bool TryAddUrlReservation(int port)
+    private static void TryAddUrlReservation(int port)
     {
         try
         {
@@ -146,58 +126,41 @@ public static class WebApiExtensions
 
             using var process = System.Diagnostics.Process.Start(startInfo);
             process?.WaitForExit(5000);
-            return process?.ExitCode == 0;
         }
         catch
         {
-            // If we can't add the reservation, the server will fall back to localhost
-            return false;
+            // Without the reservation the server falls back to localhost.
         }
     }
 
-    private static void StartTcpOnly()
-    {
-        CreatePortFile();
-        StartTcp();
-    }
-
-    private static void StartFullServer()
-    {
-        CreatePortFile();
-        _server = new BotServer(_main!, WebPort, _tcpPort);
-        _server.Start();
-        StartTcp();
-    }
-
+    // Binding to port 0 lets Windows hand out a free port, so two copies starting
+    // together can no longer both pick the same "free" one.
     private static void StartTcp()
     {
-        _cts = new CancellationTokenSource();
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        _tcp = listener;
+        _tcpPort = ((IPEndPoint)listener.LocalEndpoint).Port;
 
+        var cts = new CancellationTokenSource();
+        _cts = cts;
         Task.Run(async () =>
         {
-            try
+            while (!cts.Token.IsCancellationRequested)
             {
-                _tcp = new TcpListener(System.Net.IPAddress.Loopback, _tcpPort);
-                _tcp.Start();
-
-                while (!_cts.Token.IsCancellationRequested)
+                try
                 {
-                    var tcpTask = _tcp.AcceptTcpClientAsync();
-                    var tcs = new TaskCompletionSource<bool>();
-
-                    using (var registration = _cts.Token.Register(() => tcs.SetCanceled()))
-                    {
-                        var completedTask = await Task.WhenAny(tcpTask, tcs.Task);
-                        if (completedTask == tcpTask && tcpTask.IsCompletedSuccessfully)
-                        {
-                            _ = Task.Run(() => HandleClient(tcpTask.Result));
-                        }
-                    }
+                    var client = await listener.AcceptTcpClientAsync(cts.Token);
+                    _ = Task.Run(() => HandleClient(client));
                 }
-            }
-            catch (Exception ex) when (!_cts.Token.IsCancellationRequested)
-            {
-                LogUtil.LogError($"TCP listener error: {ex.Message}", "TCP");
+                catch (Exception) when (cts.Token.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    LogUtil.LogError($"TCP listener error: {ex.Message}", "TCP");
+                }
             }
         });
     }
@@ -213,19 +176,18 @@ public static class WebApiExtensions
 
                 using var stream = client.GetStream();
                 using var reader = new StreamReader(stream, Encoding.UTF8);
-                using var writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
+                using var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
 
                 var command = await reader.ReadLineAsync();
                 if (!string.IsNullOrEmpty(command))
                 {
-                    var response = ProcessCommand(command);
-                    await writer.WriteLineAsync(response);
-                    await stream.FlushAsync();
+                    await writer.WriteLineAsync(ProcessCommand(command));
+                    // Gives the other copy time to read the answer before the socket closes.
                     await Task.Delay(100);
                 }
             }
         }
-        catch (Exception ex) when (!(ex is IOException { InnerException: SocketException }))
+        catch (Exception ex) when (ex is not IOException { InnerException: SocketException })
         {
             LogUtil.LogError($"Error handling TCP client: {ex.Message}", "TCP");
         }
@@ -236,10 +198,7 @@ public static class WebApiExtensions
         if (_main == null)
             return "ERROR: Main form not initialized";
 
-        var parts = command.Split(':');
-        var cmd = parts[0].ToUpperInvariant();
-        var botId = parts.Length > 1 ? parts[1] : null;
-
+        var cmd = command.Split(':')[0].ToUpperInvariant();
         return cmd switch
         {
             "STARTALL" => ExecuteGlobalCommand(BotControlCommand.Start),
@@ -252,113 +211,56 @@ public static class WebApiExtensions
             "SCREENONALL" => ExecuteGlobalCommand(BotControlCommand.ScreenOnAll),
             "SCREENOFFALL" => ExecuteGlobalCommand(BotControlCommand.ScreenOffAll),
             "LISTBOTS" => GetBotsList(),
-            "STATUS" => GetBotStatuses(botId),
-            "ISREADY" => CheckReady(),
             "INFO" => GetInstanceInfo(),
             "VERSION" => SVRaidBot.Version,
-            "UPDATE" => TriggerUpdate(),
+            "UPDATE" => TriggerUpdate(command),
             _ => $"ERROR: Unknown command '{cmd}'"
         };
     }
 
-    private static string TriggerUpdate()
+    // UPDATE:<tag>:<sha256>:<file> comes from a master that already looked the release
+    // up; a bare UPDATE (older masters) means look it up here.
+    private static string TriggerUpdate(string command)
     {
-        try
+        Func<Task> update;
+        if (UpdateRules.TryReadUpdateCommand(command, out var tag, out var digest, out var assetName))
         {
-            if (_main == null)
-                return "ERROR: Main form not initialized";
-
-            _main.BeginInvoke((MethodInvoker)(async () =>
-            {
-                var (updateAvailable, _, newVersion) = await UpdateChecker.CheckForUpdatesAsync(false);
-                if (updateAvailable)
-                {
-                    var updateForm = new UpdateForm(false, newVersion, true);
-                    updateForm.PerformUpdate();
-                }
-            }));
-
-            return "OK: Update triggered";
+            if (!UpdateRules.IsNewer(tag, SVRaidBot.Version))
+                return $"OK: Already on {SVRaidBot.Version}";
+            var release = UpdateChecker.Release.ForTag(tag, digest, assetName);
+            update = () => UpdateInstaller.RunAsync(release);
         }
-        catch (Exception ex)
+        else
         {
-            return $"ERROR: {ex.Message}";
+            update = UpdateToLatestAsync;
         }
+
+        return _main!.RunOnUiThread(() => _ = update()) ? "OK: Update triggered" : "ERROR: Window is closing";
+    }
+
+    private static async Task UpdateToLatestAsync()
+    {
+        var latest = await UpdateChecker.GetLatestAsync();
+        if (latest == null)
+            LogUtil.LogError("Update failed: could not fetch the latest release.", "Update");
+        else if (UpdateRules.IsNewer(latest.Tag, SVRaidBot.Version))
+            await UpdateInstaller.RunAsync(latest);
     }
 
     private static string ExecuteGlobalCommand(BotControlCommand command)
     {
-        try
-        {
-            _main!.BeginInvoke((MethodInvoker)(() =>
-            {
-                var sendAllMethod = _main.GetType().GetMethod("SendAll",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                sendAllMethod?.Invoke(_main, new object[] { command });
-            }));
-
-            return $"OK: {command} command sent to all bots";
-        }
-        catch (Exception ex)
-        {
-            return $"ERROR: Failed to execute {command} - {ex.Message}";
-        }
+        var main = _main!;
+        return main.RunOnUiThread(() => main.SendAll(command))
+            ? $"OK: {command} command sent to all bots"
+            : $"ERROR: Failed to execute {command} - the window is closing";
     }
 
     private static string GetBotsList()
     {
         try
         {
-            var botList = new List<object>();
-            var config = GetConfig();
-            var controllers = GetBotControllers();
-
-            // If no controllers found in UI, try to get from Bots property
-            if (controllers.Count == 0)
-            {
-                var botsProperty = _main!.GetType().GetProperty("Bots",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-                if (botsProperty?.GetValue(_main) is List<PokeBotState> bots)
-                {
-                    foreach (var bot in bots)
-                    {
-                        botList.Add(new
-                        {
-                            Id = $"{bot.Connection.IP}:{bot.Connection.Port}",
-                            Name = bot.Connection.IP,
-                            RoutineType = bot.InitialRoutine.ToString(),
-                            Status = "Unknown",
-                            ConnectionType = bot.Connection.Protocol.ToString(),
-                            bot.Connection.IP,
-                            bot.Connection.Port
-                        });
-                    }
-
-                    return System.Text.Json.JsonSerializer.Serialize(new { Bots = botList });
-                }
-            }
-
-            // Use controllers if available
-            foreach (var controller in controllers)
-            {
-                var state = controller.State;
-                var botName = GetBotName(state, config);
-                var status = controller.ReadBotState();
-
-                botList.Add(new
-                {
-                    Id = $"{state.Connection.IP}:{state.Connection.Port}",
-                    Name = botName,
-                    RoutineType = state.InitialRoutine.ToString(),
-                    Status = status,
-                    ConnectionType = state.Connection.Protocol.ToString(),
-                    state.Connection.IP,
-                    state.Connection.Port
-                });
-            }
-
-            return System.Text.Json.JsonSerializer.Serialize(new { Bots = botList });
+            var bots = _main!.BotSources().Select(BotInfo.From).ToList();
+            return JsonSerializer.Serialize(new BotList(bots));
         }
         catch (Exception ex)
         {
@@ -367,69 +269,19 @@ public static class WebApiExtensions
         }
     }
 
-    private static string GetBotStatuses(string? botId)
-    {
-        try
-        {
-            var config = GetConfig();
-            var controllers = GetBotControllers();
-
-            if (string.IsNullOrEmpty(botId))
-            {
-                var statuses = controllers.Select(c => new
-                {
-                    Id = $"{c.State.Connection.IP}:{c.State.Connection.Port}",
-                    Name = GetBotName(c.State, config),
-                    Status = c.ReadBotState()
-                }).ToList();
-
-                return System.Text.Json.JsonSerializer.Serialize(statuses);
-            }
-
-            var botController = controllers.FirstOrDefault(c =>
-                $"{c.State.Connection.IP}:{c.State.Connection.Port}" == botId);
-
-            return botController?.ReadBotState() ?? "ERROR: Bot not found";
-        }
-        catch (Exception ex)
-        {
-            return $"ERROR: Failed to get status - {ex.Message}";
-        }
-    }
-
-    private static string CheckReady()
-    {
-        try
-        {
-            var controllers = GetBotControllers();
-            var hasRunningBots = controllers.Any(c => c.GetBot()?.IsRunning ?? false);
-            return hasRunningBots ? "READY" : "NOT_READY";
-        }
-        catch
-        {
-            return "NOT_READY";
-        }
-    }
-
     private static string GetInstanceInfo()
     {
         try
         {
-            var config = GetConfig();
-            var version = GetVersion();
-            var mode = config?.Mode.ToString() ?? "Unknown";
-            var name = GetInstanceName(config, mode);
-
-            var info = new
+            var config = _main!.Config;
+            return JsonSerializer.Serialize(new
             {
-                Version = version,
-                Mode = mode,
-                Name = name,
+                Version = SVRaidBot.Version,
+                Mode = config?.Mode.ToString() ?? "Unknown",
+                Name = BotServer.InstanceName(config),
                 Environment.ProcessId,
                 Port = _tcpPort
-            };
-
-            return System.Text.Json.JsonSerializer.Serialize(info);
+            });
         }
         catch (Exception ex)
         {
@@ -437,179 +289,15 @@ public static class WebApiExtensions
         }
     }
 
-    private static List<BotController> GetBotControllers()
-    {
-        var flpBotsField = _main!.GetType().GetField("FLP_Bots",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-        if (flpBotsField?.GetValue(_main) is FlowLayoutPanel flpBots)
-        {
-            return flpBots.Controls.OfType<BotController>().ToList();
-        }
-
-        return new List<BotController>();
-    }
-
-    private static ProgramConfig? GetConfig()
-    {
-        var configProp = _main?.GetType().GetProperty("Config",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        return configProp?.GetValue(_main) as ProgramConfig;
-    }
-
-    private static string GetBotName(PokeBotState state, ProgramConfig? config)
-    {
-        // Always return IP address as the bot name
-        return state.Connection.IP;
-    }
-
-    private static string GetVersion()
-    {
-        return SVRaidBot.Version;
-    }
-
-    private static string GetInstanceName(ProgramConfig? config, string mode)
-    {
-        if (!string.IsNullOrEmpty(config?.Hub?.BotName))
-            return config.Hub.BotName;
-
-        return mode switch
-        {
-            "LGPE" => "LGPE",
-            "BDSP" => "BDSP",
-            "SWSH" => "SWSH",
-            "SV" => "SV",
-            "LA" => "LA",
-            _ => "SVRaidBot"
-        };
-    }
-
-    private static void CreatePortFile()
-    {
-        try
-        {
-            var exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
-            var exeDir = Path.GetDirectoryName(exePath) ?? Program.WorkingDirectory;
-            DeleteStalePortFiles(exeDir);
-            var portFile = Path.Combine(exeDir, $"SVRaidBot_{Environment.ProcessId}.port");
-            File.WriteAllText(portFile, _tcpPort.ToString());
-            AppDomain.CurrentDomain.ProcessExit -= OnProcessExit;
-            AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
-        }
-        catch (Exception ex)
-        {
-            LogUtil.LogError($"Failed to create port file: {ex.Message}", "WebServer");
-        }
-    }
-
-    private static void OnProcessExit(object? sender, EventArgs e) => CleanupPortFile();
-
-    // A copy that crashed or was ended from Task Manager never removes its own file,
-    // so every start clears the files of copies that are no longer running.
-    private static void DeleteStalePortFiles(string exeDir)
-    {
-        var self = System.Diagnostics.Process.GetCurrentProcess();
-        foreach (var file in Directory.EnumerateFiles(exeDir, "SVRaidBot_*.port"))
-        {
-            try
-            {
-                var idText = Path.GetFileNameWithoutExtension(file)["SVRaidBot_".Length..];
-                if (!int.TryParse(idText, out int pid) || pid == self.Id || IsLiveCopy(pid, self.ProcessName, File.GetLastWriteTime(file)))
-                    continue;
-                File.Delete(file);
-            }
-            catch (Exception ex)
-            {
-                LogUtil.LogError($"Could not remove old port file {Path.GetFileName(file)}: {ex.Message}", "WebServer");
-            }
-        }
-    }
-
-    // Windows reuses process ids, so the id must belong to this program and to a
-    // process that was already running when the file was written.
-    private static bool IsLiveCopy(int pid, string processName, DateTime written)
-    {
-        try
-        {
-            using var process = System.Diagnostics.Process.GetProcessById(pid);
-            return process.ProcessName.Equals(processName, StringComparison.OrdinalIgnoreCase)
-                && process.StartTime <= written.AddMinutes(1);
-        }
-        catch (ArgumentException)
-        {
-            return false; // no process with that id
-        }
-        catch
-        {
-            return true; // can't tell; leave it alone
-        }
-    }
-
-    private static void CleanupPortFile()
-    {
-        try
-        {
-            var exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
-            var exeDir = Path.GetDirectoryName(exePath) ?? Program.WorkingDirectory;
-            var portFile = Path.Combine(exeDir, $"SVRaidBot_{Environment.ProcessId}.port");
-
-            if (File.Exists(portFile))
-                File.Delete(portFile);
-        }
-        catch (Exception ex)
-        {
-            LogUtil.LogError($"Failed to cleanup port file: {ex.Message}", "WebServer");
-        }
-    }
-
-    private static int FindAvailablePort(int startPort)
-    {
-        for (int port = startPort; port < startPort + 100; port++)
-        {
-            if (!IsPortInUse(port))
-                return port;
-        }
-        throw new InvalidOperationException("No available ports found");
-    }
-
-    private static bool IsPortInUse(int port)
-    {
-        try
-        {
-            using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMilliseconds(200) };
-            var response = client.GetAsync($"http://localhost:{port}/api/bot/instances").Result;
-            return response.IsSuccessStatusCode;
-        }
-        catch
-        {
-            // Also check TCP
-            try
-            {
-                using var tcpClient = new TcpClient();
-                var result = tcpClient.BeginConnect("127.0.0.1", port, null, null);
-                var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromMilliseconds(200));
-                if (success)
-                {
-                    tcpClient.EndConnect(result);
-                    return true;
-                }
-                return false;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-    }
-
     public static void StopWebServer(this Main mainForm)
     {
         try
         {
+            _monitorCts?.Cancel();
             _cts?.Cancel();
             _tcp?.Stop();
             _server?.Dispose();
-            CleanupPortFile();
+            InstanceDiscovery.Unregister();
         }
         catch (Exception ex)
         {
