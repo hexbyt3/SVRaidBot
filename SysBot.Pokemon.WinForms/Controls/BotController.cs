@@ -1,4 +1,5 @@
 ﻿using SysBot.Base;
+using SysBot.Pokemon.SV.BotRaid;
 using System;
 using System.ComponentModel;
 using System.Drawing;
@@ -20,6 +21,7 @@ namespace SysBot.Pokemon.WinForms
         // Animation state
         private float hoverProgress = 0f;
         private float progressValue = 0f;
+        private float paintedProgress = -1f;
         private bool isHovering = false;
         private DateTime animationStart = DateTime.Now;
         private Color currentStatusColor = Color.FromArgb(87, 242, 135); // Green
@@ -226,8 +228,6 @@ namespace SysBot.Pokemon.WinForms
             L_Left.Text = $"{bot.Connection.Name}\n{State.InitialRoutine}";
         }
 
-        private DateTime LastUpdateStatus = DateTime.Now;
-
         public void ReloadStatus(BotSource<PokeBotState> b)
         {
             if (b == null) return;
@@ -263,23 +263,15 @@ namespace SysBot.Pokemon.WinForms
                 return;
             }
 
-            if (LastUpdateStatus == lastTime)
-                return;
-
-            // Color decay from Green based on time
+            // Fades from green to red the longer the bot goes without logging anything,
+            // so a bot that hangs shows it even though nothing new arrives.
             const int threshold = 100;
             Color good = Color.FromArgb(87, 242, 135); // Green
             if (cfg.Connection.Protocol == SwitchProtocol.USB)
                 good = Color.FromArgb(88, 101, 242); // Blue for USB
             Color bad = Color.FromArgb(237, 66, 69); // Red
 
-            var delta = DateTime.Now - lastTime;
-            var seconds = delta.Seconds;
-
-            LastUpdateStatus = lastTime;
-            if (seconds > 2 * threshold)
-                return;
-
+            var seconds = Math.Max(0, (DateTime.Now - lastTime).TotalSeconds);
             if (seconds > threshold)
             {
                 targetStatusColor = bad;
@@ -309,7 +301,7 @@ namespace SysBot.Pokemon.WinForms
             Remove?.Invoke(this, EventArgs.Empty);
         }
 
-        public void SendCommand(BotControlCommand cmd, bool echo = true)
+        public void SendCommand(BotControlCommand cmd, bool confirm = true)
         {
             if (Runner?.Config.SkipConsoleBotCreation != false)
             {
@@ -327,25 +319,7 @@ namespace SysBot.Pokemon.WinForms
             if (cmd == BotControlCommand.Start || cmd == BotControlCommand.Resume ||
                 cmd == BotControlCommand.Restart || cmd == BotControlCommand.RebootAndStop)
             {
-                try
-                {
-                    // Try to reset HasErrored flag if RotatingRaidBotSV exists
-                    var raidBotType = Type.GetType("SysBot.Pokemon.SV.BotRaid.RotatingRaidBotSV, SysBot.Pokemon");
-                    if (raidBotType != null)
-                    {
-                        var hasErroredProp = raidBotType.GetProperty("HasErrored",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                        if (hasErroredProp != null && hasErroredProp.CanWrite)
-                        {
-                            hasErroredProp.SetValue(null, false);
-                            LogUtil.LogInfo("Reset HasErrored flag", "BotController");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogUtil.LogError($"Failed to reset error flag: {ex.Message}", "BotController");
-                }
+                RotatingRaidBotSV.HasErrored = false;
             }
 
             switch (cmd)
@@ -366,8 +340,9 @@ namespace SysBot.Pokemon.WinForms
                     break;
                 case BotControlCommand.Restart:
                     {
-                        var prompt = WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Are you sure you want to restart the connection?");
-                        if (prompt != DialogResult.Yes)
+                        // Only a click here asks first; a command from the web panel or another
+                        // copy would otherwise wait on a dialog nobody at the panel can see.
+                        if (confirm && WinFormsUtil.Prompt(MessageBoxButtons.YesNo, "Are you sure you want to restart the connection?") != DialogResult.Yes)
                             return;
 
                         bot.Restart();
@@ -379,65 +354,7 @@ namespace SysBot.Pokemon.WinForms
             }
         }
 
-        public string ReadBotState()
-        {
-            try
-            {
-                var botSource = GetBot();
-                if (botSource == null)
-                    return "ERROR";
-
-                var bot = botSource.Bot;
-                if (bot == null)
-                    return "ERROR";
-
-                // Check if bot is stopped first
-                if (!botSource.IsRunning)
-                    return "STOPPED";
-
-                if (botSource.IsStopping)
-                    return "STOPPING";
-
-                if (botSource.IsPaused)
-                {
-                    return "IDLE";
-                }
-
-                if (botSource.IsRunning && !bot.Connection.Connected)
-                    return "REBOOTING";
-
-                var cfg = bot.Config;
-                if (cfg == null)
-                    return "UNKNOWN";
-
-                // For SVRaidBot, when running it should show the actual routine
-                // Check if bot is actively running and connected
-                if (botSource.IsRunning && bot.Connection.Connected)
-                {
-                    // If InitialRoutine is RotatingRaidBot, show that when running
-                    if (State.InitialRoutine == PokeRoutineType.RotatingRaidBot)
-                        return "RotatingRaidBot";
-
-                    // Otherwise return current routine type
-                    if (cfg.CurrentRoutineType != PokeRoutineType.Idle)
-                        return cfg.CurrentRoutineType.ToString();
-
-                    // If current routine is Idle but bot is running, check NextRoutineType
-                    if (cfg.NextRoutineType != PokeRoutineType.Idle)
-                        return cfg.NextRoutineType.ToString();
-
-                    // Default to showing the initial routine if running
-                    return State.InitialRoutine.ToString();
-                }
-
-                return "IDLE";
-            }
-            catch (Exception ex)
-            {
-                LogUtil.LogError($"Error reading bot state: {ex.Message}", "BotController");
-                return "ERROR";
-            }
-        }
+        public string ReadBotState() => GetBot() is { } bot ? WebApi.BotStatus.Read(bot) : "ERROR";
 
         public BotSource<PokeBotState>? GetBot()
         {
@@ -729,6 +646,9 @@ namespace SysBot.Pokemon.WinForms
 
         private void AnimationTimer_Tick(object sender, EventArgs e)
         {
+            if (!Visible || ParentForm?.WindowState == FormWindowState.Minimized)
+                return;
+
             bool needsRedraw = false;
 
             // Update hover animation
@@ -751,7 +671,9 @@ namespace SysBot.Pokemon.WinForms
             // Smoothly transition status color
             if (currentStatusColor != targetStatusColor)
             {
-                currentStatusColor = Blend(targetStatusColor, currentStatusColor, 0.1);
+                var next = Blend(targetStatusColor, currentStatusColor, 0.1);
+                // Rounding can leave the blend a step short forever, which would repaint every tick.
+                currentStatusColor = next == currentStatusColor ? targetStatusColor : next;
                 PB_Lamp.BackColor = currentStatusColor;
                 statusPanel.Invalidate();
                 PB_Lamp.Invalidate();
@@ -763,7 +685,11 @@ namespace SysBot.Pokemon.WinForms
                 Invalidate();
             }
 
-            progressBar.Invalidate();
+            if (progressValue != paintedProgress)
+            {
+                paintedProgress = progressValue;
+                progressBar.Invalidate();
+            }
         }
 
         // Custom menu renderer for dark theme
