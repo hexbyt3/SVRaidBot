@@ -522,7 +522,7 @@ namespace SysBot.Pokemon.SV
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
-            catch (Exception) { return false; }
+            catch (Exception ex) when (IsMissingBlock(ex)) { return false; }
             //If we get there without exceptions, the block address is valid
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(block.Key, header);
@@ -543,6 +543,22 @@ namespace SysBot.Pokemon.SV
         {
             byte[] data = await SwitchConnection.PointerPeek(block.Size, block.Pointer!, token).ConfigureAwait(false);
             return data;
+        }
+
+        // The block isn't there to write: no pointer, a key missing from the table, or memory
+        // that can't be read. A dropped connection or a stop is not a miss and reaches the caller.
+        private static bool IsMissingBlock(Exception ex) => ex is ArgumentException or SwitchReadFailedException;
+
+        // Object blocks the bot reads are event raid tables, tens of KB. A size far past that
+        // means the header decrypted to garbage, and reading it would ask for gigabytes.
+        private const uint MaxObjectBlockSize = 0x100000;
+
+        private static int ObjectBlockSize(byte[] header, uint key)
+        {
+            uint size = ReadUInt32LittleEndian(header.AsSpan()[1..]);
+            if (size > MaxObjectBlockSize)
+                throw new SwitchReadFailedException($"Save block {key:X8} claims to be {size} bytes long, so it was not read correctly.");
+            return (int)size;
         }
 
         private async Task<ulong> GetBlockAddress(DataBlock block, CancellationToken token, bool prepareAddress = true)
@@ -670,7 +686,7 @@ namespace SysBot.Pokemon.SV
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
-            catch (Exception) { return false; }
+            catch (Exception ex) when (IsMissingBlock(ex)) { return false; }
             //If we get there without exceptions, the block address is valid
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(block.Key, header);
@@ -706,7 +722,7 @@ namespace SysBot.Pokemon.SV
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
-            catch (Exception) { return false; }
+            catch (Exception ex) when (IsMissingBlock(ex)) { return false; }
             //If we get there without exceptions, the block address is valid
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(block.Key, header);
@@ -736,7 +752,7 @@ namespace SysBot.Pokemon.SV
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
-            catch (Exception) { return false; }
+            catch (Exception ex) when (IsMissingBlock(ex)) { return false; }
             //If we get there without exceptions, the block address is valid
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, block.Size, token).ConfigureAwait(false);
             data = BlockUtil.DecryptBlock(block.Key, data);
@@ -758,7 +774,7 @@ namespace SysBot.Pokemon.SV
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
-            catch (Exception) { return false; }
+            catch (Exception ex) when (IsMissingBlock(ex)) { return false; }
             //If we get there without exceptions, the block address is valid
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, 6 + block.Size, token).ConfigureAwait(false);
             data = BlockUtil.DecryptBlock(block.Key, data);
@@ -780,12 +796,12 @@ namespace SysBot.Pokemon.SV
             //Always read and decrypt first to validate address and data
             ulong address;
             try { address = await GetBlockAddress(block, token).ConfigureAwait(false); }
-            catch (Exception) { return false; }
+            catch (Exception ex) when (IsMissingBlock(ex)) { return false; }
             //If we get there without exceptions, the block address is valid
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(block.Key, header);
-            uint size = ReadUInt32LittleEndian(header.AsSpan()[1..]);
-            byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5 + (int)size, token);
+            int size = ObjectBlockSize(header, block.Key);
+            byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5 + size, token).ConfigureAwait(false);
             byte[] ram = BlockUtil.DecryptBlock(block.Key, data)[5..];
             if (!ram.SequenceEqual(valueToExpect)) { return false; }
             //If we get there then both block address and block data are valid, we can safely inject
@@ -849,8 +865,8 @@ namespace SysBot.Pokemon.SV
             ulong address = await GetBlockAddress(block, token).ConfigureAwait(false);
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(block.Key, header);
-            uint size = ReadUInt32LittleEndian(header.AsSpan()[1..]);
-            byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5 + (int)size, token);
+            int size = ObjectBlockSize(header, block.Key);
+            byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5 + size, token).ConfigureAwait(false);
             byte[] res = BlockUtil.DecryptBlock(block.Key, data)[5..];
             return res;
         }
@@ -877,8 +893,8 @@ namespace SysBot.Pokemon.SV
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(header_ofs, 5, token).ConfigureAwait(false);
             header = BlockUtil.DecryptBlock(key, header);
 
-            uint size = BitConverter.ToUInt32(header.AsSpan()[1..]);
-            byte[] obj = await SwitchConnection.ReadBytesAbsoluteAsync(header_ofs, (int)size + 5, token).ConfigureAwait(false);
+            int size = ObjectBlockSize(header, key);
+            byte[] obj = await SwitchConnection.ReadBytesAbsoluteAsync(header_ofs, size + 5, token).ConfigureAwait(false);
             return BlockUtil.DecryptBlock(key, obj)[5..];
         }
 
