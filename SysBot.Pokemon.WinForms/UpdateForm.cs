@@ -1,10 +1,6 @@
 ﻿using System;
 using SysBot.Base;
-using SysBot.Pokemon.SV.BotRaid.Helpers;
-using System.Diagnostics;
 using System.Drawing;
-using System.IO;
-using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -94,30 +90,6 @@ namespace SysBot.Pokemon.WinForms
             UpdateFormText();
         }
 
-        public async void PerformUpdate()
-        {
-            buttonDownload.Enabled = false;
-            buttonDownload.Text = "Downloading...";
-
-            try
-            {
-                string? downloadUrl = await UpdateChecker.FetchDownloadUrlAsync();
-                if (!string.IsNullOrWhiteSpace(downloadUrl))
-                {
-                    string downloadedFilePath = await StartDownloadProcessAsync(downloadUrl);
-                    if (!string.IsNullOrEmpty(downloadedFilePath))
-                    {
-                        InstallUpdate(downloadedFilePath);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Main.IsUpdating = false;
-                LogUtil.LogError($"Update failed: {ex.Message}", "Update");
-            }
-        }
-
         private void UpdateFormText()
         {
             if (isUpdateAvailable)
@@ -142,65 +114,27 @@ namespace SysBot.Pokemon.WinForms
 
             try
             {
-                string? downloadUrl = await UpdateChecker.FetchDownloadUrlAsync();
-                if (!string.IsNullOrWhiteSpace(downloadUrl))
-                {
-                    string downloadedFilePath = await StartDownloadProcessAsync(downloadUrl);
-                    if (!string.IsNullOrEmpty(downloadedFilePath))
-                    {
-                        InstallUpdate(downloadedFilePath);
-                    }
-                }
-                else
+                var latest = await UpdateChecker.GetLatestAsync(refresh: true);
+                if (latest?.DownloadUrl == null)
                 {
                     MessageBox.Show("Failed to fetch the download URL. Please check your internet connection and try again.",
                         "Download Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
+                await UpdateInstaller.InstallAsync(latest);
             }
             catch (Exception ex)
             {
-                Main.IsUpdating = false;
+                LogUtil.LogError($"Update failed: {ex.Message}", "Update");
                 MessageBox.Show($"Update failed: {ex.Message}", "Update Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
-                buttonDownload.Enabled = true;
-                buttonDownload.Text = isUpdateAvailable ? "Download Update" : "Re-Download Latest Version";
-            }
-        }
-
-        private static async Task<string> StartDownloadProcessAsync(string downloadUrl)
-        {
-            Main.IsUpdating = true;
-            string tempPath = Path.Combine(Path.GetTempPath(), $"SVRaidBot_{Guid.NewGuid()}.exe");
-
-            using (var client = new HttpClient())
-            {
-                client.DefaultRequestHeaders.Add("User-Agent", "SVRaidBot");
-                var response = await client.GetAsync(downloadUrl);
-                response.EnsureSuccessStatusCode();
-                var fileBytes = await response.Content.ReadAsByteArrayAsync();
-                await File.WriteAllBytesAsync(tempPath, fileBytes);
-            }
-
-            return tempPath;
-        }
-
-        private static void InstallUpdate(string downloadedFilePath)
-        {
-            try
-            {
-                string batchPath = UpdateScript.PathFor(Environment.ProcessId);
-                File.WriteAllText(batchPath, UpdateScript.Build(Environment.ProcessId));
-                Process.Start(UpdateScript.StartInfo(batchPath, Application.ExecutablePath, downloadedFilePath));
-
-                // Exit the current instance
-                Application.Exit();
-            }
-            catch (Exception ex)
-            {
-                Main.IsUpdating = false;
-                MessageBox.Show($"Failed to install update: {ex.Message}", "Update Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!IsDisposed)
+                {
+                    buttonDownload.Enabled = true;
+                    buttonDownload.Text = isUpdateAvailable ? "Download Update" : "Re-Download Latest Version";
+                }
             }
         }
 

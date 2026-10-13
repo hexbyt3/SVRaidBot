@@ -1,15 +1,16 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using SysBot.Base;
 using SysBot.Pokemon.SV.BotRaid.Helpers;
 
 namespace SysBot.Pokemon.WinForms.WebApi;
 
+/// <summary>
+/// "Update all" from the web panel: idle the copies that are behind, wait for the panel
+/// to see them idle, then update the other copies and this one last.
+/// </summary>
 public static class UpdateManager
 {
     public class UpdateAllResult
@@ -32,151 +33,158 @@ public static class UpdateManager
         public string? Error { get; set; }
     }
 
+    private sealed record CopyVersion(int ProcessId, int Port, string Version);
+
+    private static readonly object UpdatingLock = new();
+    private static HashSet<int>? _updating;
+    private static DateTime _updatingSince;
+    private static readonly TimeSpan UpdateWaitLimit = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// The copies an update in progress is waiting on, or null when none is. Copies
+    /// already on the latest version are not idled, so they must not hold the wait up.
+    /// </summary>
+    public static IReadOnlySet<int>? UpdatingProcessIds
+    {
+        get
+        {
+            // A panel closed mid-wait never sends "proceed"; don't filter forever.
+            lock (UpdatingLock)
+                return DateTime.UtcNow - _updatingSince < UpdateWaitLimit ? _updating : null;
+        }
+    }
+
+    private static void SetUpdating(IEnumerable<int>? processIds)
+    {
+        lock (UpdatingLock)
+        {
+            _updating = processIds == null ? null : [.. processIds];
+            _updatingSince = DateTime.UtcNow;
+        }
+    }
+
     public static async Task<UpdateAllResult> StartUpdateProcessAsync(Main mainForm, int currentPort)
     {
-        var result = new UpdateAllResult();
+        var (latest, all, outdated) = await SurveyAsync(currentPort);
+        if (latest == null)
+            return FetchFailed();
 
-        var (updateAvailable, _, latestVersion) = await UpdateChecker.CheckForUpdatesAsync(false);
-        if (string.IsNullOrEmpty(latestVersion))
+        var result = new UpdateAllResult { TotalInstances = all.Count, UpdatesNeeded = outdated.Count };
+        result.InstanceResults.AddRange(outdated.Select(c => Describe(c, latest)));
+        if (outdated.Count == 0)
         {
-            result.UpdatesFailed = 1;
-            result.InstanceResults.Add(new InstanceUpdateResult
-            {
-                Error = "Failed to fetch latest version"
-            });
+            SetUpdating(null);
             return result;
         }
 
-        var instances = GetAllInstances(currentPort);
-        result.TotalInstances = instances.Count;
-
-        var instancesNeedingUpdate = new List<(int ProcessId, int Port, string Version)>();
-
-        foreach (var instance in instances)
+        SetUpdating(outdated.Select(c => c.ProcessId));
+        LogUtil.LogInfo($"Idling the bots of {outdated.Count} copies before updating to {latest.Tag}...", "UpdateManager");
+        foreach (var copy in outdated)
         {
-            if (instance.Version != latestVersion)
-            {
-                instancesNeedingUpdate.Add(instance);
-                result.UpdatesNeeded++;
-                result.InstanceResults.Add(new InstanceUpdateResult
-                {
-                    Port = instance.Port,
-                    ProcessId = instance.ProcessId,
-                    CurrentVersion = instance.Version,
-                    LatestVersion = latestVersion,
-                    NeedsUpdate = true
-                });
-            }
+            bool sent = copy.ProcessId == Environment.ProcessId
+                ? mainForm.RunOnUiThread(() => mainForm.SendAll(BotControlCommand.Idle))
+                : !InstanceDiscovery.Query(copy.Port, "IDLEALL").StartsWith("ERROR");
+            if (!sent)
+                LogUtil.LogError($"Failed to send idle command to port {copy.Port}", "UpdateManager");
         }
-
-        if (instancesNeedingUpdate.Count == 0)
-        {
-            return result;
-        }
-
-        // Start idling all bots
-        LogUtil.LogInfo($"Idling all bots across {instancesNeedingUpdate.Count} instances before updates...", "UpdateManager");
-
-        foreach (var (processId, port, version) in instancesNeedingUpdate)
-        {
-            if (processId == Environment.ProcessId)
-            {
-                mainForm.RunOnUiThread(() => mainForm.SendAll(BotControlCommand.Idle));
-            }
-            else
-            {
-                var idleResponse = InstanceDiscovery.Query(port, "IDLEALL");
-                if (idleResponse.StartsWith("ERROR"))
-                {
-                    LogUtil.LogError($"Failed to send idle command to port {port}", "UpdateManager");
-                }
-            }
-        }
-
-        // Return immediately after starting the idle process
         return result;
     }
 
     public static async Task<UpdateAllResult> ProceedWithUpdatesAsync(Main mainForm, int currentPort)
     {
-        var result = new UpdateAllResult();
-
-        var (updateAvailable, _, latestVersion) = await UpdateChecker.CheckForUpdatesAsync(false);
-        var instances = GetAllInstances(currentPort);
-        var instancesNeedingUpdate = instances.Where(i => i.Version != latestVersion).ToList();
-
-        result.TotalInstances = instances.Count;
-        result.UpdatesNeeded = instancesNeedingUpdate.Count;
-
-        var sortedInstances = instancesNeedingUpdate
-            .Where(i => i.ProcessId != Environment.ProcessId)
-            .Concat(instancesNeedingUpdate.Where(i => i.ProcessId == Environment.ProcessId))
-            .ToList();
-
-        foreach (var (processId, port, currentVersion) in sortedInstances)
+        try
         {
-            var instanceResult = new InstanceUpdateResult
-            {
-                Port = port,
-                ProcessId = processId,
-                CurrentVersion = currentVersion,
-                LatestVersion = latestVersion,
-                NeedsUpdate = true
-            };
+            var (latest, all, outdated) = await SurveyAsync(currentPort);
+            if (latest == null)
+                return FetchFailed();
 
-            try
-            {
-                if (processId == Environment.ProcessId)
-                {
-                    var updateForm = new UpdateForm(false, latestVersion, true);
-                    mainForm.BeginInvoke((MethodInvoker)(() =>
-                    {
-                        updateForm.PerformUpdate();
-                    }));
+            var result = new UpdateAllResult { TotalInstances = all.Count, UpdatesNeeded = outdated.Count };
 
-                    instanceResult.UpdateStarted = true;
+            // This copy goes last: updating it closes the panel's server.
+            foreach (var copy in outdated.OrderBy(c => c.ProcessId == Environment.ProcessId))
+            {
+                var instanceResult = Describe(copy, latest);
+                instanceResult.Error = TriggerUpdate(mainForm, copy, latest);
+                instanceResult.UpdateStarted = instanceResult.Error == null;
+                if (instanceResult.UpdateStarted)
                     result.UpdatesStarted++;
-                    LogUtil.LogInfo("Master instance update triggered", "UpdateManager");
-                }
                 else
-                {
-                    LogUtil.LogInfo($"Triggering update for instance on port {port}...", "UpdateManager");
-                    var updateResponse = InstanceDiscovery.Query(port, "UPDATE");
-                    if (!updateResponse.StartsWith("ERROR"))
-                    {
-                        instanceResult.UpdateStarted = true;
-                        result.UpdatesStarted++;
-                        LogUtil.LogInfo($"Update triggered for instance on port {port}", "UpdateManager");
-                        await Task.Delay(5000);
-                    }
-                    else
-                    {
-                        instanceResult.Error = "Failed to start update";
-                        result.UpdatesFailed++;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                instanceResult.Error = ex.Message;
-                result.UpdatesFailed++;
-                LogUtil.LogError($"Error updating instance on port {port}: {ex.Message}", "UpdateManager");
-            }
+                    result.UpdatesFailed++;
+                result.InstanceResults.Add(instanceResult);
 
-            result.InstanceResults.Add(instanceResult);
+                // Spreads the downloads out a little.
+                if (instanceResult.UpdateStarted && copy.ProcessId != Environment.ProcessId)
+                    await Task.Delay(5000);
+            }
+            return result;
         }
-
-        return result;
+        finally
+        {
+            SetUpdating(null);
+        }
     }
 
-    private static List<(int ProcessId, int Port, string Version)> GetAllInstances(int currentPort)
+    private static string? TriggerUpdate(Main mainForm, CopyVersion copy, UpdateChecker.Release latest)
     {
-        var instances = new List<(int, int, string)> { (Environment.ProcessId, currentPort, SVRaidBot.Version) };
+        try
+        {
+            if (copy.ProcessId == Environment.ProcessId)
+            {
+                LogUtil.LogInfo("Updating this copy last.", "UpdateManager");
+                return mainForm.RunOnUiThread(() => _ = UpdateInstaller.RunAsync(latest)) ? null : "This copy is closing";
+            }
+
+            LogUtil.LogInfo($"Triggering update for instance on port {copy.Port}...", "UpdateManager");
+            var response = InstanceDiscovery.Query(copy.Port, UpdateRules.UpdateCommand(latest.Tag, latest.Digest, latest.AssetName));
+            if (response.StartsWith("ERROR"))
+                return $"Failed to start update: {response}";
+            LogUtil.LogInfo($"Update triggered for instance on port {copy.Port}", "UpdateManager");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            LogUtil.LogError($"Error updating instance on port {copy.Port}: {ex.Message}", "UpdateManager");
+            return ex.Message;
+        }
+    }
+
+    private static async Task<(UpdateChecker.Release? Latest, List<CopyVersion> All, List<CopyVersion> Outdated)> SurveyAsync(int currentPort)
+    {
+        var latest = await UpdateChecker.GetLatestAsync();
+        var all = GetAllInstances(currentPort);
+        if (latest == null)
+            return (null, all, []);
+
+        // A plain != would "update" a copy running a newer build back down to the release.
+        var outdated = all.Where(c => UpdateRules.IsNewer(latest.Tag, c.Version)).ToList();
+        return (latest, all, outdated);
+    }
+
+    private static UpdateAllResult FetchFailed() => new()
+    {
+        UpdatesFailed = 1,
+        InstanceResults = [new InstanceUpdateResult { Error = "Failed to fetch latest version" }]
+    };
+
+    private static InstanceUpdateResult Describe(CopyVersion copy, UpdateChecker.Release latest) => new()
+    {
+        Port = copy.Port,
+        ProcessId = copy.ProcessId,
+        CurrentVersion = copy.Version,
+        LatestVersion = latest.Tag,
+        NeedsUpdate = true
+    };
+
+    private static List<CopyVersion> GetAllInstances(int currentPort)
+    {
+        var instances = new List<CopyVersion> { new(Environment.ProcessId, currentPort, SVRaidBot.Version) };
         foreach (var copy in InstanceDiscovery.FindOthers())
         {
             var version = InstanceDiscovery.Query(copy.Port, "VERSION");
-            if (!version.StartsWith("ERROR"))
-                instances.Add((copy.ProcessId, copy.Port, version.Trim()));
+            if (version.StartsWith("ERROR"))
+                LogUtil.LogError($"The copy on port {copy.Port} did not answer: {version}", "UpdateManager");
+            else
+                instances.Add(new CopyVersion(copy.ProcessId, copy.Port, version.Trim()));
         }
         return instances;
     }

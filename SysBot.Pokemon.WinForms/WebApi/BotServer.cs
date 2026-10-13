@@ -306,12 +306,15 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     {
         try
         {
-            var instances = new List<InstanceIdleStatus>
-            {
-                InstanceIdleStatus.From(_tcpPort, Environment.ProcessId, LocalBots())
-            };
+            // While an update waits, only the copies it will update count.
+            var updating = UpdateManager.UpdatingProcessIds;
+            bool counts(int processId) => updating == null || updating.Contains(processId);
 
-            foreach (var instance in ScanRemoteInstances().Where(i => i.IsOnline))
+            var instances = new List<InstanceIdleStatus>();
+            if (counts(Environment.ProcessId))
+                instances.Add(InstanceIdleStatus.From(_tcpPort, Environment.ProcessId, LocalBots()));
+
+            foreach (var instance in ScanRemoteInstances().Where(i => i.IsOnline && counts(i.ProcessId)))
             {
                 if (TryListBots(instance.Port, out var bots))
                     instances.Add(InstanceIdleStatus.From(instance.Port, instance.ProcessId, bots));
@@ -335,14 +338,12 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     {
         try
         {
-            var (updateAvailable, _, latestVersion) = await UpdateChecker.CheckForUpdatesAsync(false);
-            var changelog = await UpdateChecker.FetchChangelogAsync();
-
+            var latest = await UpdateChecker.GetLatestAsync();
             return JsonSerializer.Serialize(new
             {
-                version = latestVersion,
-                changelog,
-                available = updateAvailable
+                version = latest?.Tag ?? "Unknown",
+                changelog = latest?.Body ?? "Failed to fetch the latest release information.",
+                available = latest != null && UpdateRules.IsNewer(latest.Tag, SVRaidBot.Version)
             });
         }
         catch (Exception ex)

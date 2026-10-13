@@ -213,31 +213,38 @@ public static class WebApiExtensions
             "LISTBOTS" => GetBotsList(),
             "INFO" => GetInstanceInfo(),
             "VERSION" => SVRaidBot.Version,
-            "UPDATE" => TriggerUpdate(),
+            "UPDATE" => TriggerUpdate(command),
             _ => $"ERROR: Unknown command '{cmd}'"
         };
     }
 
-    private static string TriggerUpdate()
+    // UPDATE:<tag>:<sha256>:<file> comes from a master that already looked the release
+    // up; a bare UPDATE (older masters) means look it up here.
+    private static string TriggerUpdate(string command)
     {
-        var main = _main!;
-        bool queued = main.RunOnUiThread(async () =>
+        Func<Task> update;
+        if (UpdateRules.TryReadUpdateCommand(command, out var tag, out var digest, out var assetName))
         {
-            try
-            {
-                var (updateAvailable, _, newVersion) = await UpdateChecker.CheckForUpdatesAsync(false);
-                if (updateAvailable)
-                {
-                    var updateForm = new UpdateForm(false, newVersion, true);
-                    updateForm.PerformUpdate();
-                }
-            }
-            catch (Exception ex)
-            {
-                LogUtil.LogError($"Update failed: {ex.Message}", "Update");
-            }
-        });
-        return queued ? "OK: Update triggered" : "ERROR: Window is closing";
+            if (!UpdateRules.IsNewer(tag, SVRaidBot.Version))
+                return $"OK: Already on {SVRaidBot.Version}";
+            var release = UpdateChecker.Release.ForTag(tag, digest, assetName);
+            update = () => UpdateInstaller.RunAsync(release);
+        }
+        else
+        {
+            update = UpdateToLatestAsync;
+        }
+
+        return _main!.RunOnUiThread(() => _ = update()) ? "OK: Update triggered" : "ERROR: Window is closing";
+    }
+
+    private static async Task UpdateToLatestAsync()
+    {
+        var latest = await UpdateChecker.GetLatestAsync();
+        if (latest == null)
+            LogUtil.LogError("Update failed: could not fetch the latest release.", "Update");
+        else if (UpdateRules.IsNewer(latest.Tag, SVRaidBot.Version))
+            await UpdateInstaller.RunAsync(latest);
     }
 
     private static string ExecuteGlobalCommand(BotControlCommand command)
