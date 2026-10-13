@@ -58,7 +58,7 @@ namespace SysBot.Base
             {
                 try
                 {
-                    var message = await fwd(bytes, fileName, embeds);
+                    var message = await fwd(bytes, fileName, embeds).ConfigureAwait(false);
                     if (message != null)
                         sentMessages.Add(message);
                 }

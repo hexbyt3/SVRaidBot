@@ -152,7 +152,7 @@ public static class SharedRaidCodeHandler
         {
             try
             {
-                await UpdateMessageReactionCallback(message.MessageId, message.ChannelId, isActive);
+                await UpdateMessageReactionCallback(message.MessageId, message.ChannelId, isActive).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
