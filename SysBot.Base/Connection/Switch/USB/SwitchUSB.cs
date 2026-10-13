@@ -220,12 +220,20 @@ namespace SysBot.Base
 
         protected void Write(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
         {
-            if (data.Length > MaximumTransferSize)
-                WriteLarge(data, offset, method);
-            else WriteSmall(data, offset, method);
+            if (data.Length <= MaximumTransferSize)
+            {
+                WriteSmall(data, offset, method);
+                return;
+            }
+            foreach (var chunk in data.Chunk(MaximumTransferSize))
+            {
+                WriteSmall(chunk, offset, method);
+                offset += (ulong)chunk.Length;
+                Thread.Sleep((MaximumTransferSize / DelayFactor) + BaseDelay);
+            }
         }
 
-        public void WriteSmall(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
+        private void WriteSmall(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
         {
             lock (_sync)
             {
@@ -254,17 +262,6 @@ namespace SysBot.Base
                 throw new Exception(UsbDevice.LastErrorString);
             }
             return l;
-        }
-
-        private void WriteLarge(byte[] data, ulong offset, Func<ulong, byte[], byte[]> method)
-        {
-            int byteCount = data.Length;
-            for (int i = 0; i < byteCount; i += MaximumTransferSize)
-            {
-                var slice = data.SliceSafe(i, MaximumTransferSize);
-                Write(slice, offset + (uint)i, method);
-                Thread.Sleep((MaximumTransferSize / DelayFactor) + BaseDelay);
-            }
         }
 
         // A missed screenshot only costs the embed its picture; a half-read one would show as a broken image.

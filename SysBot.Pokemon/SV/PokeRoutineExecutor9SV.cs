@@ -20,8 +20,6 @@ namespace SysBot.Pokemon.SV
     {
         protected PokeDataOffsetsSV Offsets { get; } = new();
 
-        public ulong BaseBlockKeyPointer;
-
         public async Task SetCurrentBox(byte box, CancellationToken token)
         {
             await SwitchConnection.PointerPoke([box], Offsets.CurrentBoxPointer, token).ConfigureAwait(false);
@@ -307,12 +305,12 @@ namespace SysBot.Pokemon.SV
 
         private readonly IReadOnlyList<uint> DifficultyFlags = [0xEC95D8EF, 0xA9428DFE, 0x9535F471, 0x6E7F8220];
 
-        public async Task<int> GetStoryProgress(ulong BaseBlockKeyPointer, CancellationToken token)
+        public async Task<int> GetStoryProgress(ulong baseBlockKeyPointer, CancellationToken token)
         {
             for (int i = DifficultyFlags.Count - 1; i >= 0; i--)
             {
                 // See https://github.com/Lincoln-LM/sv-live-map/pull/43
-                byte[] block = await ReadSaveBlockRaid(BaseBlockKeyPointer, DifficultyFlags[i], 1, token).ConfigureAwait(false);
+                byte[] block = await ReadSaveBlockRaid(baseBlockKeyPointer, DifficultyFlags[i], 1, token).ConfigureAwait(false);
                 if (block[0] == 2)
                 {
                     return i + 1;
@@ -345,7 +343,7 @@ namespace SysBot.Pokemon.SV
             return Unlocked3Stars ? GameProgress.Unlocked3Stars : GameProgress.UnlockedTeraRaids;
         }
 
-        public async Task ReadEventRaids(ulong BaseBlockKeyPointer, RaidContainer container, CancellationToken token, bool force = false)
+        public async Task ReadEventRaids(ulong baseBlockKeyPointer, RaidContainer container, CancellationToken token, bool force = false)
         {
             string priorityFile = Path.Combine(
                 Directory.GetCurrentDirectory(),
@@ -355,23 +353,13 @@ namespace SysBot.Pokemon.SV
             if (!force && File.Exists(priorityFile))
             {
                 (pkNX.Structures.FlatBuffers.Gen9.DeliveryGroupID _, int version) = FlatbufferDumper.DumpDeliveryPriorities(
-                    await File.ReadAllBytesAsync(priorityFile, token)
+                    await File.ReadAllBytesAsync(priorityFile, token).ConfigureAwait(false)
                 );
-                byte[] block = await ReadBlockDefault(BaseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidPriorityLocation, "raid_priority_array.tmp", true, token).ConfigureAwait(false);
+                byte[] block = await ReadSaveBlockObject(baseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidPriorityLocation, token).ConfigureAwait(false);
                 (pkNX.Structures.FlatBuffers.Gen9.DeliveryGroupID _, int v2) = FlatbufferDumper.DumpDeliveryPriorities(block);
                 if (version != v2)
                 {
                     force = true;
-                }
-
-                string tempFile = Path.Combine(
-                    Directory.GetCurrentDirectory(),
-                    "cache",
-                    "raid_priority_array.tmp"
-                );
-                if (File.Exists(tempFile))
-                {
-                    File.Delete(tempFile);
                 }
 
                 if (v2 == 0) // raid reset
@@ -380,16 +368,16 @@ namespace SysBot.Pokemon.SV
                 }
             }
 
-            byte[] deliveryRaidPriorityFlatbuffer = await ReadBlockDefault(BaseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidPriorityLocation, "raid_priority_array", force, token).ConfigureAwait(false);
+            byte[] deliveryRaidPriorityFlatbuffer = await ReadBlockDefault(baseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidPriorityLocation, "raid_priority_array", force, token).ConfigureAwait(false);
             (pkNX.Structures.FlatBuffers.Gen9.DeliveryGroupID groupID, int priority) = FlatbufferDumper.DumpDeliveryPriorities(deliveryRaidPriorityFlatbuffer);
             if (priority == 0)
             {
                 return;
             }
 
-            byte[] deliveryRaidFlatbuffer = await ReadBlockDefault(BaseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidBinaryLocation, "raid_enemy_array", force, token).ConfigureAwait(false);
-            byte[] deliveryFixedRewardFlatbuffer = await ReadBlockDefault(BaseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidFixedRewardLocation, "fixed_reward_item_array", force, token).ConfigureAwait(false);
-            byte[] deliveryLotteryRewardFlatbuffer = await ReadBlockDefault(BaseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidLotteryRewardLocation, "lottery_reward_item_array", force, token).ConfigureAwait(false);
+            byte[] deliveryRaidFlatbuffer = await ReadBlockDefault(baseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidBinaryLocation, "raid_enemy_array", force, token).ConfigureAwait(false);
+            byte[] deliveryFixedRewardFlatbuffer = await ReadBlockDefault(baseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidFixedRewardLocation, "fixed_reward_item_array", force, token).ConfigureAwait(false);
+            byte[] deliveryLotteryRewardFlatbuffer = await ReadBlockDefault(baseBlockKeyPointer, RaidCrawler.Core.Structures.Offsets.BCATRaidLotteryRewardLocation, "lottery_reward_item_array", force, token).ConfigureAwait(false);
 
             container.DistTeraRaids = TeraDistribution.GetAllEncounters(deliveryRaidFlatbuffer);
             container.MightTeraRaids = TeraMight.GetAllEncounters(deliveryRaidFlatbuffer);
@@ -507,7 +495,7 @@ namespace SysBot.Pokemon.SV
             return toExpect != default && toWrite != default
             && block.Type switch
             {
-                SCTypeCode.Object => await WriteEncryptedBlockObject(block, (byte[])toExpect, (byte[])toWrite, token),
+                SCTypeCode.Object => await WriteEncryptedBlockObject(block, (byte[])toExpect, (byte[])toWrite, token).ConfigureAwait(false),
                 SCTypeCode.Array => await WriteEncryptedBlockArray(block, (byte[])toExpect, (byte[])toWrite, token).ConfigureAwait(false),
                 SCTypeCode.Bool1 or SCTypeCode.Bool2 or SCTypeCode.Bool3 => await WriteEncryptedBlockBool(block, (bool)toExpect, (bool)toWrite, token).ConfigureAwait(false),
                 SCTypeCode.Byte or SCTypeCode.SByte => await WriteEncryptedBlockByte(block, (byte)toExpect, (byte)toWrite, token).ConfigureAwait(false),
@@ -805,7 +793,7 @@ namespace SysBot.Pokemon.SV
             byte[] ram = BlockUtil.DecryptBlock(block.Key, data)[5..];
             if (!ram.SequenceEqual(valueToExpect)) { return false; }
             //If we get there then both block address and block data are valid, we can safely inject
-            Array.ConstrainedCopy(valueToInject.ToArray(), 0, data, 5, block.Size);
+            Array.ConstrainedCopy(valueToInject, 0, data, 5, block.Size);
             data = BlockUtil.EncryptBlock(block.Key, data);
             await SwitchConnection.WriteBytesAbsoluteAsync(data, address, token).ConfigureAwait(false);
             return true;
@@ -843,14 +831,7 @@ namespace SysBot.Pokemon.SV
 
         public async Task<sbyte> ReadEncryptedBlockByte(DataBlock block, CancellationToken token)
         {
-            if (!TryGetCachedKeyEntry(block.Key, out var addr) || !await CachedKeyEntryHolds(addr, block.Key, token).ConfigureAwait(false))
-            {
-                BaseBlockKeyPointer = await SwitchConnection.PointerAll(Offsets.BlockKeyPointer, token).ConfigureAwait(false);
-                addr = await FindKeyEntry(BaseBlockKeyPointer + 8, block.Key, token).ConfigureAwait(false);
-            }
-            addr = BitConverter.ToUInt64(await SwitchConnection.ReadBytesAbsoluteAsync(addr + 8, 0x8, token).ConfigureAwait(false), 0);
-            byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(addr, 5, token).ConfigureAwait(false);
-            header = BlockUtil.DecryptBlock(block.Key, header);
+            byte[] header = await ReadEncryptedBlockHeader(block, token).ConfigureAwait(false);
             return (sbyte)header[1];
         }
 
@@ -874,9 +855,9 @@ namespace SysBot.Pokemon.SV
         public Task<ulong> SearchSaveKey(ulong baseBlock, uint key, CancellationToken token)
             => FindKeyEntryCached(baseBlock + 8, key, token);
 
-        public async Task<byte[]> ReadSaveBlockRaid(ulong BaseBlockKeyPointer, uint key, int size, CancellationToken token)
+        public async Task<byte[]> ReadSaveBlockRaid(ulong baseBlockKeyPointer, uint key, int size, CancellationToken token)
         {
-            ulong block_ofs = await SearchSaveKey(BaseBlockKeyPointer, key, token).ConfigureAwait(false);
+            ulong block_ofs = await SearchSaveKey(baseBlockKeyPointer, key, token).ConfigureAwait(false);
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(block_ofs + 8, 0x8, token).ConfigureAwait(false);
             block_ofs = BitConverter.ToUInt64(data, 0);
 
@@ -884,9 +865,9 @@ namespace SysBot.Pokemon.SV
             return BlockUtil.DecryptBlock(key, block);
         }
 
-        public async Task<byte[]> ReadSaveBlockObject(ulong BaseBlockKeyPointer, uint key, CancellationToken token)
+        public async Task<byte[]> ReadSaveBlockObject(ulong baseBlockKeyPointer, uint key, CancellationToken token)
         {
-            ulong header_ofs = await SearchSaveKey(BaseBlockKeyPointer, key, token).ConfigureAwait(false);
+            ulong header_ofs = await SearchSaveKey(baseBlockKeyPointer, key, token).ConfigureAwait(false);
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(header_ofs + 8, 8, token).ConfigureAwait(false);
             header_ofs = BitConverter.ToUInt64(data);
 
@@ -898,18 +879,19 @@ namespace SysBot.Pokemon.SV
             return BlockUtil.DecryptBlock(key, obj)[5..];
         }
 
-        public async Task<byte[]> ReadBlockDefault(ulong BaseBlockKeyPointer, uint key, string? cache, bool force, CancellationToken token)
+        public async Task<byte[]> ReadBlockDefault(ulong baseBlockKeyPointer, uint key, string? cache, bool force, CancellationToken token)
         {
+            if (cache is null)
+                return await ReadSaveBlockObject(baseBlockKeyPointer, key, token).ConfigureAwait(false);
+
             string folder = Path.Combine(Directory.GetCurrentDirectory(), "cache");
             _ = Directory.CreateDirectory(folder);
 
-            string path = Path.Combine(folder, cache ?? "");
-            if (force is false && cache is not null && File.Exists(path))
-            {
-                return File.ReadAllBytes(path);
-            }
+            string path = Path.Combine(folder, cache);
+            if (!force && File.Exists(path))
+                return await File.ReadAllBytesAsync(path, token).ConfigureAwait(false);
 
-            byte[] bin = await ReadSaveBlockObject(BaseBlockKeyPointer, key, token).ConfigureAwait(false);
+            byte[] bin = await ReadSaveBlockObject(baseBlockKeyPointer, key, token).ConfigureAwait(false);
             File.WriteAllBytes(path, bin);
             return bin;
         }

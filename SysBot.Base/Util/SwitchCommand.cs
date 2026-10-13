@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
@@ -107,7 +108,7 @@ namespace SysBot.Base
         /// <param name="data">Data to write</param>
         /// <param name="crlf">Line terminator (unused by USB protocol)</param>
         /// <returns>Encoded command bytes</returns>
-        public static byte[] Poke(uint offset, byte[] data, bool crlf = true) => Encode($"poke 0x{offset:X8} 0x{string.Concat(data.Select(z => $"{z:X2}"))}", crlf);
+        public static byte[] Poke(uint offset, byte[] data, bool crlf = true) => Encode($"poke 0x{offset:X8} 0x{Convert.ToHexString(data)}", crlf);
 
         /// <summary>
         /// Requests the Bot to send <see cref="count"/> bytes from absolute <see cref="offset"/>.
@@ -125,7 +126,7 @@ namespace SysBot.Base
         /// <param name="data">Data to write</param>
         /// <param name="crlf">Line terminator (unused by USB protocol)</param>
         /// <returns>Encoded command bytes</returns>
-        public static byte[] PokeAbsolute(ulong offset, byte[] data, bool crlf = true) => Encode($"pokeAbsolute 0x{offset:X16} 0x{string.Concat(data.Select(z => $"{z:X2}"))}", crlf);
+        public static byte[] PokeAbsolute(ulong offset, byte[] data, bool crlf = true) => Encode($"pokeAbsolute 0x{offset:X16} 0x{Convert.ToHexString(data)}", crlf);
 
         /// <summary>
         /// Requests the Bot to send <see cref="count"/> bytes from main <see cref="offset"/>.
@@ -143,7 +144,7 @@ namespace SysBot.Base
         /// <param name="data">Data to write</param>
         /// <param name="crlf">Line terminator (unused by USB protocol)</param>
         /// <returns>Encoded command bytes</returns>
-        public static byte[] PokeMain(ulong offset, byte[] data, bool crlf = true) => Encode($"pokeMain 0x{offset:X16} 0x{string.Concat(data.Select(z => $"{z:X2}"))}", crlf);
+        public static byte[] PokeMain(ulong offset, byte[] data, bool crlf = true) => Encode($"pokeMain 0x{offset:X16} 0x{Convert.ToHexString(data)}", crlf);
 
         /*
          *
@@ -167,7 +168,7 @@ namespace SysBot.Base
         /// <param name="data">Data to write</param>
         /// <param name="crlf">Line terminator (unused by USB protocol)</param>
         /// <returns>Encoded command bytes</returns>
-        public static byte[] PointerPoke(IEnumerable<long> jumps, byte[] data, bool crlf = true) => Encode($"pointerPoke 0x{string.Concat(data.Select(z => $"{z:X2}"))}{string.Concat(jumps.Select(z => $" {z}"))}", crlf);
+        public static byte[] PointerPoke(IEnumerable<long> jumps, byte[] data, bool crlf = true) => Encode($"pointerPoke 0x{Convert.ToHexString(data)}{string.Concat(jumps.Select(z => $" {z}"))}", crlf);
 
         /// <summary>
         /// Requests the Bot to solve the pointer traversals defined by <see cref="jumps"/> and send the final absolute offset.

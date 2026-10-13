@@ -36,6 +36,15 @@ namespace SysBot.Tests
             var convert = Decoder.ConvertHexByteStringToBytes(raw);
             convert.SequenceEqual(expect).Should().BeTrue();
         }
+
+        // A screenshot that lost a digit used to decode with every byte after the gap shifted.
+        [Fact]
+        public void OddLengthHexIsRejected()
+        {
+            byte[] raw = { 0x30, 0x31, 0x30 };
+            var convert = () => Decoder.ConvertHexByteStringToBytes(raw);
+            convert.Should().Throw<System.ArgumentOutOfRangeException>();
+        }
     }
 
     public class BotbaseVersionTests
