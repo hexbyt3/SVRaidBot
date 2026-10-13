@@ -17,7 +17,7 @@ namespace SysBot.Pokemon.Discord
         [RequireOwner]
         public async Task SudoUsers([Remainder] string _)
         {
-            var users = Context.Message.MentionedUsers;
+            var users = Context.MentionedUsersExceptBot();
             var objects = users.Select(GetReference);
             SysCordSettings.Settings.GlobalSudoList.AddIfNew(objects);
             await ReplyAsync("Done.").ConfigureAwait(false);
@@ -28,7 +28,7 @@ namespace SysBot.Pokemon.Discord
         [RequireOwner]
         public async Task RemoveSudoUsers([Remainder] string _)
         {
-            var users = Context.Message.MentionedUsers;
+            var users = Context.MentionedUsersExceptBot();
             var objects = users.Select(GetReference);
             SysCordSettings.Settings.GlobalSudoList.RemoveAll(z => objects.Any(o => o.ID == z.ID));
             await ReplyAsync("Done.").ConfigureAwait(false);

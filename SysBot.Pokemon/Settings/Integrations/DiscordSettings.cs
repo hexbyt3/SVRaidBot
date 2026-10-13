@@ -18,7 +18,7 @@ namespace SysBot.Pokemon
         [Category(Startup), Description("Bot login token.")]
         public string Token { get; set; } = string.Empty;
 
-        [Category(Startup), Description("Bot command prefix.")]
+        [Category(Startup), Description("Bot command prefix. Without the Message Content intent (mention-only mode) the prefix works only in DMs; in servers, commands start with an @mention of the bot.")]
         public string CommandPrefix { get; set; } = "$";
 
         [Category(Startup), Description("Toggle to handle commands asynchronously or synchronously.")]
