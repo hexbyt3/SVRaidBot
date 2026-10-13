@@ -40,28 +40,31 @@ namespace SysBot.Base
         public async Task ClickConfirmed(SwitchButton b, int delay, CancellationToken token)
         {
             await Connection.SendAsync(SwitchCommand.Click(b, UseCRLF), token).ConfigureAwait(false);
-            await ConfirmPress(token).ConfigureAwait(false);
+            await ConfirmPress(SwitchConnection.Connections, token).ConfigureAwait(false);
             await Task.Delay(delay, token).ConfigureAwait(false);
         }
 
         public async Task PressAndHoldConfirmed(SwitchButton b, int hold, int delay, CancellationToken token)
         {
             await Connection.SendAsync(SwitchCommand.Hold(b, UseCRLF), token).ConfigureAwait(false);
-            await ConfirmPress(token).ConfigureAwait(false);
+            await ConfirmPress(SwitchConnection.Connections, token).ConfigureAwait(false);
             await Task.Delay(hold, token).ConfigureAwait(false);
             await Connection.SendAsync(SwitchCommand.Release(b, UseCRLF), token).ConfigureAwait(false);
-            await ConfirmPress(token).ConfigureAwait(false);
+            await ConfirmPress(SwitchConnection.Connections, token).ConfigureAwait(false);
             await Task.Delay(delay, token).ConfigureAwait(false);
         }
 
-        // A healthy answer takes well under a second. One that needed a retry means the
-        // connection was replaced, and a press still queued on the old one was lost.
-        // Waiting behind a Discord screenshot on the same connection doesn't count.
+        // A healthy answer takes well under a second. If the connection was replaced after
+        // the press went out (say a screenshot ahead of us stalled and forced a reconnect),
+        // the press was lost however quickly the new connection answers. Merely waiting
+        // behind a Discord screenshot on the same connection doesn't count.
         public static TimeSpan PressConfirmLimit { get; set; } = TimeSpan.FromSeconds(1.5);
 
-        private async Task ConfirmPress(CancellationToken token)
+        private async Task ConfirmPress(int connectionAfterPress, CancellationToken token)
         {
             var answered = await SwitchConnection.PingAsync(token).ConfigureAwait(false);
+            if (SwitchConnection.Connections != connectionAfterPress)
+                throw new PressNotConfirmedException("The connection was replaced before a button press could be confirmed.");
             if (answered > PressConfirmLimit)
                 throw new PressNotConfirmedException($"The console took {answered.TotalSeconds:0.0} seconds to confirm a button press.");
         }

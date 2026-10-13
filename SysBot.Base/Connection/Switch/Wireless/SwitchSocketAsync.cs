@@ -67,6 +67,7 @@ namespace SysBot.Base
                     }
                 }
                 _dirty = false;
+                Connections++;
                 Log("Connected!");
                 Label = Name;
             }
@@ -122,6 +123,8 @@ namespace SysBot.Base
         // does not end cleanly marks the socket dirty, and the next one starts on a
         // fresh connection.
         private bool _dirty;
+
+        public int Connections { get; private set; }
         // Set by Disconnect: a stopped bot stays disconnected until Connect, rather than
         // the next stray command quietly reopening sys-botbase's only connection.
         private volatile bool _closedByOwner;
@@ -184,6 +187,7 @@ namespace SysBot.Base
                 throw new IOException("Could not reconnect to the console.");
             }
             _dirty = false;
+            Connections++;
             Log("Reconnected!");
         }
 

@@ -162,6 +162,31 @@ namespace SysBot.Tests
             fake.Listener.Stop();
         }
 
+        // A screenshot queued between a press and its confirmation stalls and forces a
+        // reconnect. The new connection answers the ping at once, but the press went out
+        // on the one that was thrown away, so it can't be counted as landed.
+        [Fact]
+        public async Task PressLostToAReconnectIsNotConfirmed()
+        {
+            var fake = new FakeSwitch { ScreenshotDelay = 1_500 };
+            var bot = await Connect(fake);
+            ((SwitchSocketAsync)bot.Connection).ScreenshotTimeout = TimeSpan.FromSeconds(1);
+
+            var holding = bot.Connection.PixelPeek(CancellationToken.None);
+            var deadline = DateTime.Now.AddSeconds(5);
+            while (!fake.Commands.Contains("pixelPeek") && DateTime.Now < deadline)
+                await Task.Delay(20);
+
+            var press = bot.ClickConfirmed(SwitchButton.A, 0, CancellationToken.None);
+            await Task.Delay(100);
+            var stalled = bot.Connection.PixelPeek(CancellationToken.None);
+
+            await FluentActions.Awaiting(() => press).Should().ThrowAsync<PressNotConfirmedException>();
+            await Task.WhenAll(holding, stalled).ContinueWith(_ => { });
+            bot.Connection.Disconnect();
+            fake.Listener.Stop();
+        }
+
         // 10/07: after the clock rollback the start presses opened something other than the
         // game, and the bot read empty memory for an hour before crash-looping for three more.
         [Fact]

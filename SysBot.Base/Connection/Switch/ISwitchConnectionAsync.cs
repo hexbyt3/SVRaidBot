@@ -22,6 +22,12 @@ public interface ISwitchConnectionAsync : IConsoleConnectionAsync
     /// </summary>
     Task<TimeSpan> PingAsync(CancellationToken token);
 
+    /// <summary>
+    /// Goes up every time the connection is opened again. A change means anything sent
+    /// before it went out on a connection that was then thrown away.
+    /// </summary>
+    int Connections { get; }
+
     Task<string> GetBotbaseVersion(CancellationToken token);
 
     Task<string> GetGameInfo(string info, CancellationToken token);

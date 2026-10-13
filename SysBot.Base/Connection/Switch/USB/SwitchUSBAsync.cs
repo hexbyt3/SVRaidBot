@@ -65,6 +65,8 @@ namespace SysBot.Base
             }, token);
         }
 
+        public int Connections => 0;
+
         public Task<TimeSpan> PingAsync(CancellationToken token) => Task.Run(() => TimeExchange(SwitchCommand.GetTitleID(false)), token);
 
         public Task<string> GetBotbaseVersion(CancellationToken token)
