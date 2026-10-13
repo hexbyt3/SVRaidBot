@@ -38,6 +38,7 @@ namespace SysBot.Pokemon.Discord
         private const int MaxReconnectDelay = 60000; // 1 minute
         private int _reconnectAttempts;
         private volatile bool _stoppedForGood;
+        private string _apiToken = string.Empty;
         private readonly RaidCodeCooldown _codeCooldown = new();
         private readonly CommandService _commands;
         private readonly IServiceProvider _services;
@@ -77,7 +78,37 @@ namespace SysBot.Pokemon.Discord
             _client.Log += Log;
             _client.Connected += OnConnected;
             _client.Disconnected += HandleDisconnect;
+            _client.Ready += LoadLoggingAndEcho;
+            _client.MessageReceived += HandleMessageAsync;
+            _client.ReactionAdded += HandleReactionAddedAsync;
+            _client.ReactionAdded += ExtraCommandUtil<T>.HandleReactionAsync;
             ReactionService = new ReactionService(_client);
+        }
+
+        // Discord checks intents when the bot (re)connects, so a bot that crosses 10,000 users
+        // while running learns it lost Message Content as a 4014 on its next reconnect. Intents
+        // are fixed per client, so connect a new one without it. The old one stays logged in
+        // for REST, which the restored log and echo channels still send through.
+        private async Task SwitchToMentionOnlyAsync()
+        {
+            var old = _client;
+            old.Disconnected -= HandleDisconnect;
+            old.MessageReceived -= HandleMessageAsync;
+            old.ReactionAdded -= HandleReactionAddedAsync;
+            old.ReactionAdded -= ExtraCommandUtil<T>.HandleReactionAsync;
+            try { await old.StopAsync().ConfigureAwait(false); } catch { }
+
+            LogUtil.LogError("Discord took away the Message Content intent (4014). Switching to mention-only mode: commands work when the message @mentions the bot, and in DMs.", "Discord");
+            CreateClient(GatewayIntentPolicy.WithoutMessageContent);
+            try
+            {
+                await _client.LoginAsync(TokenType.Bot, _apiToken).ConfigureAwait(false);
+                await _client.StartAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"Could not reconnect in mention-only mode: {ex.Message}", "Discord");
+            }
         }
 
         private static IServiceProvider ConfigureServices() => new ServiceCollection().BuildServiceProvider();
@@ -115,6 +146,12 @@ namespace SysBot.Pokemon.Discord
 
         private Task HandleDisconnect(Exception ex)
         {
+            if (GatewayIntentPolicy.GetCloseCode(ex) == 4014 && !SysCordSettings.MentionOnly)
+            {
+                _ = Task.Run(SwitchToMentionOnlyAsync);
+                return Task.CompletedTask;
+            }
+
             if (GatewayIntentPolicy.GetCloseCode(ex) is int code && GatewayIntentPolicy.IsFatalClose(ex))
             {
                 // Retrying a non-reconnectable close only burns IDENTIFYs; 1000 a day resets the token.
@@ -165,6 +202,7 @@ namespace SysBot.Pokemon.Discord
         {
             try
             {
+                _apiToken = apiToken;
                 var intents = await GatewayIntentPolicy.ResolveAsync(apiToken).ConfigureAwait(false);
                 CreateClient(intents);
                 await InitCommands().ConfigureAwait(false);
@@ -231,12 +269,6 @@ namespace SysBot.Pokemon.Discord
                     await Log(new LogMessage(LogSeverity.Error, "RaidEmbed", $"Error updating reactions: {ex.Message}")).ConfigureAwait(false);
                 }
             };
-
-            // Subscribe a handler to see if a message invokes a command.
-            _client.Ready += LoadLoggingAndEcho;
-            _client.MessageReceived += HandleMessageAsync;
-            _client.ReactionAdded += HandleReactionAddedAsync;
-            _client.ReactionAdded += ExtraCommandUtil<T>.HandleReactionAsync;
         }
 
         private Task HandleReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage,
@@ -431,18 +463,14 @@ namespace SysBot.Pokemon.Discord
 
         private async Task LoadLoggingAndEcho()
         {
-            if (MessageChannelsLoaded)
-                return;
-
-            // Restore Echoes
-            EchoModule.RestoreChannels(_client, Hub.Config.Discord);
-
-            // Restore Logging
-            LogModule.RestoreLogging(_client, Hub.Config.Discord);
-
             // Don't let it load more than once in case of Discord hiccups.
-            await Log(new LogMessage(LogSeverity.Info, "LoadLoggingAndEcho()", "Logging and Echo channels loaded!")).ConfigureAwait(false);
-            MessageChannelsLoaded = true;
+            if (!MessageChannelsLoaded)
+            {
+                EchoModule.RestoreChannels(_client, Hub.Config.Discord);
+                LogModule.RestoreLogging(_client, Hub.Config.Discord);
+                await Log(new LogMessage(LogSeverity.Info, "LoadLoggingAndEcho()", "Logging and Echo channels loaded!")).ConfigureAwait(false);
+                MessageChannelsLoaded = true;
+            }
 
             await _client.SetStatusAsync(UserStatus.Online).ConfigureAwait(false);
 

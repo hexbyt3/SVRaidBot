@@ -44,8 +44,7 @@ public static class GatewayIntentPolicy
     public static string DescribeFatalClose(int code) => code switch
     {
         4004 => "Discord rejected the bot token (4004). Reset the token in the Discord Developer Portal, put the new one in the Discord settings, and restart.",
-        4014 => "Discord refused the Message Content intent (4014) — it was revoked for this bot. Restart SVRaidBot to run Discord in mention-only mode. " +
-            "Bots that reach 10,000 users can only get the intent back by applying for Privileged Intent review in the Discord Developer Portal.",
+        4014 => "Discord refused a privileged intent (4014) even with Message Content already off. Check the intents in the Discord Developer Portal and restart.",
         _ => $"Discord closed the connection with code {code}, which cannot be fixed by retrying.",
     };
 
