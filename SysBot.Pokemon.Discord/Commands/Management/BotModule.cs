@@ -99,8 +99,8 @@ namespace SysBot.Pokemon.Discord
             if (await GetBotAsync().ConfigureAwait(false) is not { } bot)
                 return;
 
-            var c = bot.Bot.Connection;
-            c.Reset();
+            // Reset waits for any command in flight, so keep it off the gateway thread.
+            await Task.Run(bot.Bot.Connection.Reset).ConfigureAwait(false);
             bot.Start();
             await ReplyAsync($"Bot has been restarted.").ConfigureAwait(false);
         }

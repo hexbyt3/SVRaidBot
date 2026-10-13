@@ -4132,12 +4132,21 @@ namespace SysBot.Pokemon.SV.BotRaid
                 else
                 {
                     Log("Failed to deserialize raid data for boss mechanics");
+                    ForgetRaidBossMechanics();
                 }
             }
             catch (Exception ex)
             {
                 Log($"Error loading raid boss mechanics: {ex.Message}");
+                ForgetRaidBossMechanics();
             }
+        }
+
+        // Better no 7-star mechanics in the embed than the last event's.
+        private void ForgetRaidBossMechanics()
+        {
+            _raidBossMechanicsData = [];
+            _raidBossMechanicsSource = [];
         }
 
         /// <summary>

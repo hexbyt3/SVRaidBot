@@ -39,6 +39,7 @@ namespace SysBot.Pokemon
             get => _roleRaidRequest;
             set
             {
+                value ??= new();
                 _roleRaidRequest = value;
                 // Empty means everyone; older configs saved this as false while nothing checked it.
                 value.AllowIfEmpty = true;
