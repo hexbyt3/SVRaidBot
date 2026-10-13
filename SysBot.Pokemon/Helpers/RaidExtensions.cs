@@ -1,6 +1,7 @@
 ﻿using PKHeX.Core;
 using SysBot.Base;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -75,16 +76,22 @@ namespace SysBot.Pokemon
 
         public static A EnumParse<A>(string input) where A : struct, Enum => !Enum.TryParse(input, true, out A result) ? new() : result;
 
+        // A sprite's color never changes, and the raid info command waits on this synchronously.
+        private static readonly ConcurrentDictionary<string, (int R, int G, int B)> DominantColors = new();
+
         public static async Task<(int R, int G, int B)> GetDominantColorAsync(string imageUrl)
         {
             if (!OperatingSystem.IsWindowsVersionAtLeast(6, 1))
                 return (255, 255, 255); // System.Drawing bitmaps are Windows-only
 
+            if (DominantColors.TryGetValue(imageUrl, out var known))
+                return known;
+
             try
             {
-                using var response = await httpClient.GetAsync(imageUrl);
+                using var response = await httpClient.GetAsync(imageUrl).ConfigureAwait(false);
                 response.EnsureSuccessStatusCode();
-                using var stream = await response.Content.ReadAsStreamAsync();
+                using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
                 using var image = new Bitmap(stream);
 
                 var colorCount = new Dictionary<System.Drawing.Color, int>();
@@ -118,11 +125,14 @@ namespace SysBot.Pokemon
                     }
                 }
 
-                if (colorCount.Count == 0)
-                    return (255, 255, 255);
-
-                var dominantColor = colorCount.OrderByDescending(kvp => kvp.Value).First().Key;
-                return (dominantColor.R, dominantColor.G, dominantColor.B);
+                (int R, int G, int B) color = (255, 255, 255);
+                if (colorCount.Count > 0)
+                {
+                    var dominantColor = colorCount.OrderByDescending(kvp => kvp.Value).First().Key;
+                    color = (dominantColor.R, dominantColor.G, dominantColor.B);
+                }
+                DominantColors[imageUrl] = color;
+                return color;
             }
             catch (HttpRequestException ex)
             {

@@ -180,7 +180,7 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
         {
             var ptr = DeterminePointer(index);
             // IsActive is at offset 0x00, Seed is at offset 0x10, so IsActive = Seed - 0x10
-            ptr[3] -= 0x10;
+            ptr[^1] -= SeedOffsetInRaid;
             byte[] data = await _connection.PointerPeek(4, ptr, token).ConfigureAwait(false);
             return BitConverter.ToUInt32(data, 0) switch
             {
@@ -210,7 +210,7 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
         {
             var ptr = DeterminePointer(index);
             // IsActive is at offset 0x00, Seed is at offset 0x10, so IsActive = Seed - 0x10
-            ptr[3] -= 0x10;
+            ptr[^1] -= SeedOffsetInRaid;
             // IsActive is a uint32 (4 bytes), value of 1 = active, 0 = inactive
             byte[] flagBytes = BitConverter.GetBytes(isActive ? 1u : 0u);
             await _connection.PointerPoke(flagBytes, ptr, token).ConfigureAwait(false);
@@ -218,7 +218,7 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
             byte[] verification = await _connection.PointerPeek(4, ptr, token).ConfigureAwait(false);
             return BitConverter.ToUInt32(verification, 0) == (isActive ? 1u : 0u);
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return false;
         }

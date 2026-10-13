@@ -75,6 +75,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         }
 
         private Dictionary<(ushort Species, short Form), RaidBossMechanicsInfo> _raidBossMechanicsData = [];
+        private byte[] _raidBossMechanicsSource = [];
 
         /// <summary>
         /// Information about a player participating in raids
@@ -180,7 +181,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             lock (RaidListSync.Gate)
             {
                 orphaned = _settings.ActiveRaids.RemoveAll(p => p.PendingRemoval ||
-                    (p.AddedByRACommand && !p.Title.Contains(MysteryRaidTitle) && p.User is null && p.WebRequest is null));
+                    (p.AddedByRACommand && !IsMysteryRaid(p) && p.User is null && p.WebRequest is null));
             }
             if (orphaned > 0)
                 Log($"Removed {orphaned} raid request(s) left over from the last session.");
@@ -335,7 +336,7 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             // Use current game state instead of hardcoded values
             var currentGameProgress = GameProgress != GameProgress.None ? GameProgress : GameProgress.Unlocked5Stars;
-            var currentRegion = await DetectCurrentRegion(token);
+            var currentRegion = CurrentMap;
 
             Log($"Creating default shiny raids with game progress: {currentGameProgress}, region: {currentRegion}");
 
@@ -1083,12 +1084,14 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// </summary>
         private async Task HandleEmptyLobby(CancellationToken token)
         {
+            // Mark embed as inactive since nobody joined
+            await SharedRaidCodeHandler.UpdateReactionsOnAllMessages(false, token);
+
             if (CurrentWebRequest != null)
             {
                 // A requested raid gets one lobby. The member can ask again
                 // right away, and the bot is free for the next request.
                 Log("Nobody joined the GenPKM requested raid. Moving on to the next raid.");
-                await SharedRaidCodeHandler.UpdateReactionsOnAllMessages(false, token);
                 await SkipRaidOnLosses(token).ConfigureAwait(false);
                 _emptyRaid = 0;
                 _lostRaid = 0;
@@ -1097,9 +1100,6 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             _emptyRaid++;
             _lostRaid++;
-
-            // Mark embed as inactive since nobody joined
-            await SharedRaidCodeHandler.UpdateReactionsOnAllMessages(false, token);
 
             var raidNow = _settings.ActiveRaids[_currentRaidIndex];
             bool isUserRequest = raidNow.AddedByRACommand && raidNow.Title.Contains(UserRequestedRaidSuffix);
@@ -1215,8 +1215,8 @@ namespace SysBot.Pokemon.SV.BotRaid
             }
 
             // Another bot in this program may be holding its own web request; leave it alone.
-            lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAll(p => p.AddedByRACommand && (p.WebRequest is null || p.WebRequest.Host == this));
-            lock (RaidListSync.Gate) _settings.ActiveRaids.RemoveAll(p => p.Title == MysteryRaidTitle);
+            lock (RaidListSync.Gate)
+                _settings.ActiveRaids.RemoveAll(p => IsMysteryRaid(p) || (p.AddedByRACommand && (p.WebRequest is null || p.WebRequest.Host == this)));
             await WebRequests.Flush(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             await CleanExit(CancellationToken.None).ConfigureAwait(false);
         }
@@ -1626,21 +1626,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             RemoveTemporaryRaidIfNeeded("completed");
 
             // Create replacement Mystery Raid BEFORE advancing rotation (if needed)
-            if (_settings.RaidSettings.MysteryRaids)
-            {
-                int mysteryRaidCount = RaidListSync.Snapshot(_settings.ActiveRaids).Count(raid => raid.Title.Contains(MysteryRaidTitle));
-                if (mysteryRaidCount <= 1)
-                {
-                    try
-                    {
-                        CreateMysteryRaid();
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Error in CreateMysteryRaid: {ex.Message}");
-                    }
-                }
-            }
+            TopUpMysteryRaids();
 
             await SanitizeRotationCount(token).ConfigureAwait(false);
 
@@ -1772,7 +1758,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             var todayOverride = BitConverter.GetBytes(_todaySeed);
             var ptr = new List<long>(RaidCrawler.Core.Structures.Offsets.RaidBlockPointerBase.ToArray());
 
-            ptr[3] += 0x8;
+            ptr[^1] += 0x8;
             await SwitchConnection.PointerPoke(todayOverride, ptr, token).ConfigureAwait(false);
 
             Log("Today Seed override complete.");
@@ -1853,14 +1839,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             try
             {
-                // Get the appropriate location resource based on the current region
-                string denLocationResource = IsKitakami
-                    ? "SysBot.Pokemon.SV.BotRaid.DenLocations.den_locations_kitakami.json"
-                    : IsBlueberry
-                        ? "SysBot.Pokemon.SV.BotRaid.DenLocations.den_locations_blueberry.json"
-                        : "SysBot.Pokemon.SV.BotRaid.DenLocations.den_locations_base.json";
-
-                var denLocations = LoadDenLocations(denLocationResource);
+                var denLocations = GetCachedDenLocations(CurrentMap);
 
                 // For event raids, use the specific den identifier
                 if (crystalType == TeraCrystalType.Might || crystalType == TeraCrystalType.Distribution)
@@ -2052,6 +2031,21 @@ namespace SysBot.Pokemon.SV.BotRaid
             Log($"Added Mystery Raid - Species: {(Species)pk.Species}, Seed: {seedValue}.");
         }
 
+        private void TopUpMysteryRaids()
+        {
+            if (!_settings.RaidSettings.MysteryRaids || RaidListSync.Snapshot(_settings.ActiveRaids).Count(IsMysteryRaid) > 1)
+                return;
+
+            try
+            {
+                CreateMysteryRaid();
+            }
+            catch (Exception ex)
+            {
+                Log($"Error in CreateMysteryRaid: {ex.Message}");
+            }
+        }
+
         /// <summary>
         /// Every enabled story progress level that allows at least one star count, with
         /// the star counts it allows. A level is drawn first and then one of its stars.
@@ -2084,15 +2078,11 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// </summary>
         private static uint GenerateRandomShinySeed()
         {
-            Random random = new();
             uint seed;
 
             do
             {
-                // Generate a random uint
-                byte[] buffer = new byte[4];
-                random.NextBytes(buffer);
-                seed = BitConverter.ToUInt32(buffer, 0);
+                seed = (uint)Random.Shared.NextInt64(0x1_0000_0000);
 
                 // Use Xoroshiro128Plus directly with the seed
                 var xoro = new Xoroshiro128Plus(seed);
@@ -2169,6 +2159,8 @@ namespace SysBot.Pokemon.SV.BotRaid
         // Mystery raids carry Species None until their encounter is rolled.
         private static string RaidName(RotatingRaidParameters raid) =>
             raid.Species == Species.None ? raid.Title : raid.Species.ToString();
+
+        private static bool IsMysteryRaid(RotatingRaidParameters raid) => raid.Title.Contains(MysteryRaidTitle);
 
         // The one key for SpeciesToGroupIDMap and ActiveEventCrystals: the English name
         // without spaces ("IronBundle", "Ting-Lu"). GenPKM is sent these keys and sends
@@ -2435,7 +2427,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             return _settings.ActiveRaids.FindIndex(r =>
                 r.AddedByRACommand &&
-                !r.Title.Contains(MysteryRaidTitle) &&
+                !IsMysteryRaid(r) &&
                 r.ActiveInRotation &&
                 (r.WebRequest is null || (r.WebRequest.Host == this && !r.WebRequest.Lost)));
         }
@@ -2447,7 +2439,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             return _settings.ActiveRaids.FindIndex(r =>
                 r.AddedByRACommand &&
-                r.Title.Contains(MysteryRaidTitle) &&
+                IsMysteryRaid(r) &&
                 r.ActiveInRotation);
         }
 
@@ -2541,10 +2533,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             if (!currentRaid.AddedByRACommand)
                 return false;
 
-            bool isMysteryRaid = currentRaid.Title.Contains(MysteryRaidTitle);
-            bool isUserRequestedRaid = !isMysteryRaid && currentRaid.Title.Contains(UserRequestedRaidSuffix);
-
-            return isMysteryRaid || isUserRequestedRaid;
+            return IsMysteryRaid(currentRaid) || currentRaid.Title.Contains(UserRequestedRaidSuffix);
         }
 
         /// <summary>
@@ -2607,7 +2596,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 _triesWithoutLobby = 0;
                 _firstRun = false;
 
-                string raidIdentifier = nextRaid.Title.Contains(MysteryRaidTitle)
+                string raidIdentifier = IsMysteryRaid(nextRaid)
                     ? nextRaid.Title
                     : nextRaid.Species.ToString();
                 Log($"Next raid in the list: {raidIdentifier} (_currentRaidIndex: {_currentRaidIndex}, Previous: {previousIndex}).");
@@ -3031,7 +3020,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             var data = await SwitchConnection.PointerPeek(6, Offsets.TeraRaidCodePointer, token).ConfigureAwait(false);
             var code = Encoding.ASCII.GetString(data);
             _teraRaidCode = _settings.EmbedToggles.RaidCodeCase == RaidCodeCaseOptions.Uppercase
-                ? code.ToUpper()
+                ? code.ToUpperInvariant()
                 : code.ToLowerInvariant();
             return $"{_teraRaidCode}";
         }
@@ -3069,7 +3058,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             TimeSpan wait;
 
             if (_settings.ActiveRaids[_currentRaidIndex].AddedByRACommand &&
-                _settings.ActiveRaids[_currentRaidIndex].Title != MysteryRaidTitle)
+                !IsMysteryRaid(_settings.ActiveRaids[_currentRaidIndex]))
             {
                 wait = TimeSpan.FromSeconds(160) - TimeSpan.FromMilliseconds((int)_settings.EmbedToggles.RequestEmbedTime);
             }
@@ -3342,12 +3331,8 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Create tasks for all pointer resolutions
             var pointerTasks = new Dictionary<string, Task<ulong>>
             {
-                // Main game pointers
                 ["overworld"] = SwitchConnection.PointerAll(Offsets.OverworldPointer, token),
                 ["connected"] = SwitchConnection.PointerAll(Offsets.IsConnectedPointer, token),
-                ["raidP"] = SwitchConnection.PointerAll(RaidCrawler.Core.Structures.Offsets.RaidBlockPointerBase.ToArray(), token),
-                ["raidK"] = SwitchConnection.PointerAll(RaidCrawler.Core.Structures.Offsets.RaidBlockPointerKitakami.ToArray(), token),
-                ["raidB"] = SwitchConnection.PointerAll(RaidCrawler.Core.Structures.Offsets.RaidBlockPointerBlueberry.ToArray(), token)
             };
 
             // NID pointers for trainers
@@ -3365,17 +3350,13 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Assign results to member variables
             _overworldOffset = pointerTasks["overworld"].Result;
             _connectedOffset = pointerTasks["connected"].Result;
-            _raidBlockPointerP = pointerTasks["raidP"].Result;
-            _raidBlockPointerK = pointerTasks["raidK"].Result;
-            _raidBlockPointerB = pointerTasks["raidB"].Result;
 
             for (int p = 0; p < _teraNIDOffsets.Length; p++)
             {
                 _teraNIDOffsets[p] = pointerTasks[$"nid{p}"].Result;
             }
 
-            _raidMemoryManager = new RaidMemoryManager(SwitchConnection, _raidBlockPointerP, _raidBlockPointerK, _raidBlockPointerB);
-
+            await InitializeRaidBlockPointers(token).ConfigureAwait(false);
             await DetectCurrentRegion(token);
 
             // First run initialization
@@ -3386,8 +3367,6 @@ namespace SysBot.Pokemon.SV.BotRaid
                 CurrentSpawnsEnabled = (bool?)await ReadBlock(RaidDataBlocks.KWildSpawnsEnabled, token);
             }
 
-            // Load raid mechanics data
-            await LoadRaidBossMechanics(token).ConfigureAwait(false);
             Log("Caching offsets complete!");
         }
 
@@ -3512,7 +3491,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             string code = string.Empty;
 
             // If this is a raid ending, starting with players, or disbanding, update reactions first
-            if (disband || (names is not null && !upnext) || upnext)
+            if (disband || names is not null || upnext)
             {
                 // Update to red X emoji - do this BEFORE clearing tracking
                 await SharedRaidCodeHandler.UpdateReactionsOnAllMessages(false, token);
@@ -3527,7 +3506,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             // Update raid embed information before creating the embed (unless it's a disband or upnext message)
             if (!disband && !upnext && _settings.ActiveRaids.Count > 0 && _currentRaidIndex < _settings.ActiveRaids.Count)
             {
-                await UpdateRaidEmbedInfo(token);
+                UpdateRaidEmbedInfo();
             }
 
             // Determine if the raid should use a code or be "Free For All"
@@ -3551,7 +3530,7 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             // Apply delay only if the raid was added by RA command, not a Mystery Shiny Raid, and has a code
             if (_settings.ActiveRaids[_currentRaidIndex].AddedByRACommand &&
-                _settings.ActiveRaids[_currentRaidIndex].Title != MysteryRaidTitle &&
+                !IsMysteryRaid(_settings.ActiveRaids[_currentRaidIndex]) &&
                 !string.IsNullOrEmpty(code) && code != "Free For All")
             {
                 await Task.Delay((int)_settings.EmbedToggles.RequestEmbedTime, token).ConfigureAwait(false);
@@ -3690,9 +3669,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 Description = disband
                     ? message
                     : upnext
-                        ? _settings.RaidSettings.TotalRaidsToHost == 0
-                            ? $"# {_settings.ActiveRaids[_currentRaidIndex].Title}\n\n{futureTimeMessage}"
-                            : $"# {_settings.ActiveRaids[_currentRaidIndex].Title}\n\n{futureTimeMessage}"
+                        ? $"# {_settings.ActiveRaids[_currentRaidIndex].Title}\n\n{futureTimeMessage}"
                         : raidstart
                             ? ""
                             : description,
@@ -3705,11 +3682,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             {
                 embed.Title = $"**{EmbedLanguageManager.GetLocalizedText("Raid canceled", language)}: [{_teraRaidCode}]**";
             }
-            else if (upnext && _settings.RaidSettings.TotalRaidsToHost != 0)
-            {
-                embed.Title = $"{EmbedLanguageManager.GetLocalizedText("Raid Ended - Preparing Next Raid", language)}!";
-            }
-            else if (upnext && _settings.RaidSettings.TotalRaidsToHost == 0)
+            else if (upnext)
             {
                 embed.Title = $"{EmbedLanguageManager.GetLocalizedText("Raid Ended - Preparing Next Raid", language)}!";
             }
@@ -3721,7 +3694,7 @@ namespace SysBot.Pokemon.SV.BotRaid
             if (!(upnext && _settings.RaidSettings.TotalRaidsToHost == 0))
             {
                 string programIconUrl = $"https://raw.githubusercontent.com/hexbyt3/sprites/main/imgs/icon4.png";
-                int raidsIn_currentRaidIndex = RaidListSync.Snapshot(_hub.Config.RotatingRaidSV.ActiveRaids).Count(r => !r.AddedByRACommand);
+                int configuredRaidCount = RaidListSync.Snapshot(_settings.ActiveRaids).Count(r => !r.AddedByRACommand);
 
                 // Calculate uptime
                 TimeSpan uptime = DateTime.Now - StartTime;
@@ -3756,7 +3729,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 uptimeFormatted = uptimeFormatted.Trim();
 
                 string footerText = $"{EmbedLanguageManager.GetLocalizedText("Completed Raids", language)}: {_raidCount} (W: {_winCount} | L: {_lossCount})\n" +
-                                   $"{EmbedLanguageManager.GetLocalizedText("ActiveRaids", language)}: {raidsIn_currentRaidIndex} | " +
+                                   $"{EmbedLanguageManager.GetLocalizedText("ActiveRaids", language)}: {configuredRaidCount} | " +
                                    $"{EmbedLanguageManager.GetLocalizedText("Uptime", language)}: {uptimeFormatted}\n" +
                                    disclaimer;
 
@@ -3847,41 +3820,19 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             if (!disband && names is null && !upnext)
             {
-                if (code == "Free For All")
-                {
-                    string fieldName = _settings.EmbedToggles.IncludeCountdown
-                        ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
-                        : $"**{EmbedLanguageManager.GetLocalizedText("Waiting in lobby", language)}!**";
+                string fieldName = _settings.EmbedToggles.IncludeCountdown
+                    ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
+                    : $"**{EmbedLanguageManager.GetLocalizedText("Waiting in lobby", language)}!**";
 
-                    string fieldValue = $"**{EmbedLanguageManager.GetLocalizedText("Free For All", language)}**";
+                // GetRaidCode already put the code in the configured case. With the code
+                // hidden the field stays empty and players react to get it by DM.
+                string fieldValue = code == "Free For All"
+                    ? $"**{EmbedLanguageManager.GetLocalizedText("Free For All", language)}**"
+                    : !_settings.EmbedToggles.HideRaidCode
+                        ? $"{EmbedLanguageManager.GetLocalizedText("Raid Code", language)}: **{code}**"
+                        : "\u200B";
 
-                    embed.AddField(fieldName, fieldValue, true);
-                }
-                else if (!_settings.EmbedToggles.HideRaidCode)
-                {
-                    // Show raid code directly in the embed (old behavior)
-                    string fieldName = _settings.EmbedToggles.IncludeCountdown
-                        ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
-                        : $"**{EmbedLanguageManager.GetLocalizedText("Waiting in lobby", language)}!**";
-
-                    // Apply raid code case formatting
-                    string displayCode = _settings.EmbedToggles.RaidCodeCase == RaidCodeCaseOptions.Uppercase
-                        ? code.ToUpper()
-                        : code.ToLowerInvariant();
-
-                    string fieldValue = $"{EmbedLanguageManager.GetLocalizedText("Raid Code", language)}: **{displayCode}**";
-
-                    embed.AddField(fieldName, fieldValue, true);
-                }
-                else
-                {
-                    // Keep current behavior with empty field (reactions will be used)
-                    string fieldName = _settings.EmbedToggles.IncludeCountdown
-                        ? $"**__{EmbedLanguageManager.GetLocalizedText("Raid Starting", language)}__**:\n**<t:{DateTimeOffset.Now.ToUnixTimeSeconds() + 160}:R>**"
-                        : $"**{EmbedLanguageManager.GetLocalizedText("Waiting in lobby", language)}!**";
-
-                    embed.AddField(fieldName, "\u200B", true);
-                }
+                embed.AddField(fieldName, fieldValue, true);
             }
 
             if (!disband && names is not null && !upnext)
@@ -3987,10 +3938,10 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// <summary>
         /// Updates RaidEmbedInfoHelpers with accurate raid data using RaidInfoCommand
         /// </summary>
-        private Task UpdateRaidEmbedInfo(CancellationToken token)
+        private void UpdateRaidEmbedInfo()
         {
             if (NoActiveRaids || _currentRaidIndex >= _settings.ActiveRaids.Count)
-                return Task.CompletedTask;
+                return;
             var currentRaid = _settings.ActiveRaids[_currentRaidIndex];
             string seedValue = currentRaid.Seed;
 
@@ -4010,12 +3961,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 _ => 0,
             };
 
-            // Determine the proper map based on current region
-            TeraRaidMapParent map = IsKitakami
-                ? TeraRaidMapParent.Kitakami
-                : IsBlueberry
-                    ? TeraRaidMapParent.Blueberry
-                    : TeraRaidMapParent.Paldea;
+            TeraRaidMapParent map = CurrentMap;
 
             // Convert GameProgressEnum to the numeric value expected by RaidInfoCommand
             int storyProgressLevel = (int)currentRaid.StoryProgress + 1;
@@ -4050,8 +3996,6 @@ namespace SysBot.Pokemon.SV.BotRaid
                 currentRaid.SpeciesForm = pk.Form;
                 currentRaid.IsShiny = pk.IsShiny;
             }
-
-            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -4130,13 +4074,10 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// <summary>
         /// Loads raid boss mechanics data from game files
         /// </summary>
-        private async Task LoadRaidBossMechanics(CancellationToken token)
+        private async Task LoadRaidBossMechanics(ulong baseBlockKeyPointer, CancellationToken token)
         {
             try
             {
-                // Clear existing data
-                _raidBossMechanicsData.Clear();
-                var baseBlockKeyPointer = await SwitchConnection.PointerAll(Offsets.BlockKeyPointer, token).ConfigureAwait(false);
                 byte[] deliveryRaidFlatbuffer = await ReadBlockDefault(
                     baseBlockKeyPointer,
                     RaidCrawler.Core.Structures.Offsets.BCATRaidBinaryLocation,
@@ -4145,6 +4086,11 @@ namespace SysBot.Pokemon.SV.BotRaid
                     token
                 ).ConfigureAwait(false);
 
+                // The table only changes with the event, so most passes stop here.
+                if (deliveryRaidFlatbuffer.AsSpan().SequenceEqual(_raidBossMechanicsSource))
+                    return;
+
+                var mechanics = new Dictionary<(ushort Species, short Form), RaidBossMechanicsInfo>();
                 var tableEncounters = FlatBufferConverter.DeserializeFrom<pkNX.Structures.FlatBuffers.Gen9.DeliveryRaidEnemyTableArray>(deliveryRaidFlatbuffer);
 
                 if (tableEncounters?.Table != null)
@@ -4177,9 +4123,11 @@ namespace SysBot.Pokemon.SV.BotRaid
                                     mechanicsInfo.ExtraActions.Add((action.Action, action.Timing, action.Value, action.Wazano));
                                 }
                             }
-                            _raidBossMechanicsData[(entry.Info.BossPokePara.DevId, entry.Info.BossPokePara.FormId)] = mechanicsInfo;
+                            mechanics[(entry.Info.BossPokePara.DevId, entry.Info.BossPokePara.FormId)] = mechanicsInfo;
                         }
                     }
+                    _raidBossMechanicsData = mechanics;
+                    _raidBossMechanicsSource = deliveryRaidFlatbuffer;
                 }
                 else
                 {
@@ -4304,19 +4252,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 bool alreadyConnected = await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false);
                 if (alreadyConnected)
                 {
-                    // Verify the connection with additional checks for stability
-                    bool stable = true;
-                    for (int i = 0; i < 3; i++)
-                    {
-                        await Task.Delay(500, token).ConfigureAwait(false);
-                        if (!await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false))
-                        {
-                            stable = false;
-                            break;
-                        }
-                    }
-
-                    if (stable)
+                    if (await IsOnlineStable(500, token).ConfigureAwait(false))
                     {
                         Log("Already connected online, skipping connection process");
                         await Task.Delay(500, token).ConfigureAwait(false);
@@ -4342,23 +4278,8 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 try
                 {
                     // Check if already connected
-                    if (await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false))
-                    {
-                        // Verify stability
-                        bool stable = true;
-                        for (int i = 0; i < 3; i++)
-                        {
-                            await Task.Delay(1000, token).ConfigureAwait(false);
-                            if (!await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false))
-                            {
-                                stable = false;
-                                break;
-                            }
-                        }
-
-                        if (stable)
-                            break;
-                    }
+                    if (await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false) && await IsOnlineStable(1000, token).ConfigureAwait(false))
+                        break;
 
                     attemptCount++;
                     Log($"Connection attempt {attemptCount}/{maxAttempts}");
@@ -4371,22 +4292,8 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
 
                     // Check connection with stability verification
                     bool connected = await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false);
-                    if (connected)
-                    {
-                        bool stable = true;
-                        for (int i = 0; i < 3; i++)
-                        {
-                            await Task.Delay(1000, token).ConfigureAwait(false);
-                            if (!await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false))
-                            {
-                                stable = false;
-                                break;
-                            }
-                        }
-
-                        if (stable)
-                            break;
-                    }
+                    if (connected && await IsOnlineStable(1000, token).ConfigureAwait(false))
+                        break;
 
                     // Back out for next attempt if needed
                     if (attemptCount < maxAttempts && !connected)
@@ -4430,6 +4337,20 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             await Click(B, 0_500, token).ConfigureAwait(false);
             await Task.Delay(3_000, token).ConfigureAwait(false);
 
+            return true;
+        }
+
+        /// <summary>
+        /// Still online at each of three checks spaced <paramref name="checkDelay"/> apart.
+        /// </summary>
+        private async Task<bool> IsOnlineStable(int checkDelay, CancellationToken token)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                await Task.Delay(checkDelay, token).ConfigureAwait(false);
+                if (!await IsConnectedOnline(_connectedOffset, token).ConfigureAwait(false))
+                    return false;
+            }
             return true;
         }
 
@@ -4720,10 +4641,8 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         /// <summary>
         /// Extracts raid information from the specified map
         /// </summary>
-        private async Task<List<(uint Area, uint LotteryGroup, uint Den, uint Seed, uint Flags, bool IsEvent)>> ExtractRaidInfo(TeraRaidMapParent mapType, CancellationToken token)
+        private static List<(uint Area, uint LotteryGroup, uint Den, uint Seed, uint Flags, bool IsEvent)> ExtractRaidInfo(byte[] raidData)
         {
-            byte[] raidData = await ReadRaidsForRegion(mapType, token);
-
             var raids = new List<(uint Area, uint LotteryGroup, uint Den, uint Seed, uint Flags, bool IsEvent)>();
             for (int i = 0; i < raidData.Length; i += Raid.SIZE)
             {
@@ -4864,7 +4783,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         private async Task<List<(string DenIdentifier, float[] Coordinates, int Index, uint Seed, uint Flags, bool IsEvent)>> GetActiveRaidLocations(TeraRaidMapParent mapType, CancellationToken token)
         {
             // Read the raw raid data for the region
-            byte[] raidData = await ReadRaidsForRegion(mapType, token);
+            byte[] raidData = await _raidMemoryManager.ReadRaidData(mapType, token).ConfigureAwait(false);
 
             // Use cached den locations
             var denLocations = GetCachedDenLocations(mapType);
@@ -4928,21 +4847,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             RemoveTemporaryRaidIfNeeded("skipped");
 
             // Create replacement Mystery Raid BEFORE advancing rotation (if needed)
-            if (_settings.RaidSettings.MysteryRaids)
-            {
-                int mysteryRaidCount = RaidListSync.Snapshot(_settings.ActiveRaids).Count(raid => raid.Title.Contains(MysteryRaidTitle));
-                if (mysteryRaidCount <= 1)
-                {
-                    try
-                    {
-                        CreateMysteryRaid();
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Error in CreateMysteryRaid: {ex.Message}");
-                    }
-                }
-            }
+            TopUpMysteryRaids();
 
             await SanitizeRotationCount(token).ConfigureAwait(false);
             await EnqueueEmbed(null, "", false, false, true, false, token).ConfigureAwait(false);
@@ -4965,64 +4870,40 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         /// <summary>
         /// Reads raid data from the game
         /// </summary>
+        /// <summary>
+        /// Always runs right after InitializeSessionOffsets in the same pass, so the raid
+        /// block pointers and the current map it found are still good.
+        /// </summary>
         private async Task ReadRaids(CancellationToken token)
         {
             Log("Getting Raid data...");
-            await InitializeRaidBlockPointers(token);
 
             if (_firstRun)
             {
                 await LogPlayerLocation(token);
             }
             string game = await DetermineGame(token);
-            Container = new(game);
-            Container.SetGame(game);
+            var baseBlockKeyPointer = await SwitchConnection.PointerAll(Offsets.BlockKeyPointer, token).ConfigureAwait(false);
+            _storyProgress = await GetStoryProgress(baseBlockKeyPointer, token).ConfigureAwait(false);
+            _eventProgress = Math.Min(_storyProgress, 3);
+            var currentRegion = CurrentMap;
 
-            await SetStoryAndEventProgress(token);
-            TeraRaidMapParent currentRegion = await DetectCurrentRegion(token);
-
-            var allRaids = new List<Raid>();
-            var allEncounters = new List<ITeraRaid>();
-            var allRewards = new List<List<(int, int, int)>>();
-
-            Log($"Reading {currentRegion} Raids...");
-            var regionData = await _raidMemoryManager.ReadRaidData(currentRegion, token);
-            var (regionRaids, regionEncounters, regionRewards) = await ProcessRaids(regionData, currentRegion, token);
-
-            allRaids.AddRange(regionRaids);
-            allEncounters.AddRange(regionEncounters);
-            allRewards.AddRange(regionRewards);
-
-            // Set combined data to container and process all raids
-            Container.SetRaids(allRaids);
-            Container.SetEncounters(allEncounters);
-            Container.SetRewards(allRewards);
-            await ProcessAllRaids(token);
-
-            Log($"Successfully processed {allRaids.Count} raids from {currentRegion}");
-        }
-
-        /// <summary>
-        /// Processes raids for a specific map
-        /// </summary>
-        private async Task<(List<Raid>, List<ITeraRaid>, List<List<(int, int, int)>>)> ProcessRaids(byte[] data, TeraRaidMapParent mapType, CancellationToken token)
-        {
-            var tempContainer = new RaidContainer(Container!.Game);
-            tempContainer.SetGame(Container.Game);
+            // Built whole before it is published: Discord reads Container from other threads.
+            var container = new RaidContainer(game);
+            container.SetGame(game);
 
             Log("Reading event raid status...");
-            // Read event raids into tempContainer
-            var baseBlockKeyPointer = await SwitchConnection.PointerAll(Offsets.BlockKeyPointer, token).ConfigureAwait(false);
-            await ReadEventRaids(baseBlockKeyPointer, tempContainer, token).ConfigureAwait(false);
-            await ReadEventRaids(baseBlockKeyPointer, Container, token).ConfigureAwait(false);
+            await ReadEventRaids(baseBlockKeyPointer, container, token).ConfigureAwait(false);
+            await LoadRaidBossMechanics(baseBlockKeyPointer, token).ConfigureAwait(false);
 
-            tempContainer.ReadAllRaids(data, _storyProgress, _eventProgress, 0, mapType);
+            Log($"Reading {currentRegion} Raids...");
+            var regionData = await _raidMemoryManager.ReadRaidData(currentRegion, token).ConfigureAwait(false);
+            container.ReadAllRaids(regionData, _storyProgress, _eventProgress, 0, currentRegion);
+            Container = container;
 
-            var raidsList = tempContainer.Raids.ToList();
-            var encountersList = tempContainer.Encounters.ToList();
-            var rewardsList = tempContainer.Rewards.Select(r => r.ToList()).ToList();
+            await ProcessAllRaids(container, regionData, token);
 
-            return (raidsList, encountersList, rewardsList);
+            Log($"Successfully processed {container.Raids.Count} raids from {currentRegion}");
         }
 
         /// <summary>
@@ -5051,40 +4932,16 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
         }
 
         /// <summary>
-        /// Sets the story and event progress levels
-        /// </summary>
-        private async Task SetStoryAndEventProgress(CancellationToken token)
-        {
-            var baseBlockKeyPointer = await SwitchConnection.PointerAll(Offsets.BlockKeyPointer, token).ConfigureAwait(false);
-            _storyProgress = await GetStoryProgress(baseBlockKeyPointer, token).ConfigureAwait(false);
-            _eventProgress = Math.Min(_storyProgress, 3);
-        }
-
-        /// <summary>
-        /// Reads raid data for a specific region
-        /// </summary>
-        private async Task<byte[]> ReadRaidsForRegion(TeraRaidMapParent region, CancellationToken token)
-        {
-            return region switch
-            {
-                TeraRaidMapParent.Paldea => await SwitchConnection.ReadBytesAbsoluteAsync(_raidBlockPointerP + RaidBlock.HEADER_SIZE, (int)RaidBlock.SIZE_BASE, token).ConfigureAwait(false),
-                TeraRaidMapParent.Kitakami => await SwitchConnection.ReadBytesAbsoluteAsync(_raidBlockPointerK, (int)RaidBlock.SIZE_KITAKAMI, token).ConfigureAwait(false),
-                TeraRaidMapParent.Blueberry => await SwitchConnection.ReadBytesAbsoluteAsync(_raidBlockPointerB, (int)RaidBlock.SIZE_BLUEBERRY, token).ConfigureAwait(false),
-                _ => throw new ArgumentException("Invalid region", nameof(region))
-            };
-        }
-
-        /// <summary>
         /// Processes all raids and updates information
         /// </summary>
-        private async Task ProcessAllRaids(CancellationToken token)
+        private async Task ProcessAllRaids(RaidContainer container, byte[] regionData, CancellationToken token)
         {
             // Marked here and removed between raids, so no position the loop relies on shifts.
             foreach (var bad in RaidListSync.MarkUnreadableSeeds(_settings.ActiveRaids))
                 Log($"Invalid seed format detected. Removing {bad.Seed} from the list.");
 
-            var allRaids = Container!.Raids;
-            var allEncounters = Container.Encounters;
+            var allRaids = container.Raids;
+            var allEncounters = container.Encounters;
 
             if (string.IsNullOrEmpty(_denHexSeed))
                 return;
@@ -5092,8 +4949,6 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
             uint denHexSeedUInt;
             denHexSeedUInt = uint.Parse(_denHexSeed, NumberStyles.AllowHexSpecifier);
             await FindSeedIndexInRaids(denHexSeedUInt, token);
-            var currentRegion = await DetectCurrentRegion(token);
-            var raidInfoList = await ExtractRaidInfo(currentRegion, token);
             bool newEventSpeciesFound = false;
             Dictionary<string, List<(int GroupID, int Index, string DenIdentifier)>> eventGroups = new(EventSpeciesComparer.Instance);
             Dictionary<string, HashSet<TeraCrystalType>> eventCrystals = new(EventSpeciesComparer.Instance);
@@ -5126,11 +4981,10 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 }
             }
 
-            // Event dens are found by their seed in Paldea's raid block. Container.Raids
+            // Event dens are found by their seed in Paldea's raid block, which is the
+            // block just read: new events are only looked for in Paldea. Container.Raids
             // skips empty and invalid slots, so a position in that list is not a slot.
-            byte[]? paldeaRaids = newEventSpeciesFound
-                ? await _raidMemoryManager.ReadRaidData(TeraRaidMapParent.Paldea, token).ConfigureAwait(false)
-                : null;
+            var raidInfoList = ExtractRaidInfo(regionData);
 
             var configuredRaids = RaidListSync.Snapshot(_settings.ActiveRaids);
             int maxRaidIndex = Math.Min(allRaids.Count, allEncounters.Count);
@@ -5159,7 +5013,7 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
 
                         if (isDistributionRaid)
                         {
-                            var distRaid = Container.DistTeraRaids!.FirstOrDefault(d => d.Species == encounter1.Species && d.Form == encounter1.Form);
+                            var distRaid = container.DistTeraRaids!.FirstOrDefault(d => d.Species == encounter1.Species && d.Form == encounter1.Form);
                             if (distRaid != null)
                             {
                                 groupID = distRaid.DeliveryGroupID;
@@ -5167,14 +5021,14 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                         }
                         else if (isMightRaid)
                         {
-                            var mightRaid = Container.MightTeraRaids!.FirstOrDefault(m => m.Species == encounter1.Species && m.Form == encounter1.Form);
+                            var mightRaid = container.MightTeraRaids!.FirstOrDefault(m => m.Species == encounter1.Species && m.Form == encounter1.Form);
                             if (mightRaid != null)
                             {
                                 groupID = mightRaid.DeliveryGroupID;
                             }
                         }
 
-                        int slot = FindSlotBySeed(paldeaRaids!, raid.Seed);
+                        int slot = FindSlotBySeed(regionData, raid.Seed);
                         if (groupID != -1 && slot >= 0)
                         {
                             if (!eventCrystals.TryGetValue(speciesKey, out var crystals))
