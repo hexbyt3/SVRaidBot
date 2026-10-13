@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net.Sockets;
 using System.Text;
@@ -115,11 +116,13 @@ namespace SysBot.Base
         public TimeSpan ReplyTimeout { get; set; } = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
 
-        private async Task<T> ExchangeAsync<T>(byte[] command, Func<CancellationToken, ValueTask<T>> receive, CancellationToken token)
+        // A running timer keeps running through retries, so a retried exchange counts its backoff too.
+        private async Task<T> ExchangeAsync<T>(byte[] command, Func<CancellationToken, ValueTask<T>> receive, CancellationToken token, Stopwatch? timer = null)
         {
             await _io.WaitAsync(token).ConfigureAwait(false);
             try
             {
+                timer?.Start();
                 if (_closedByOwner)
                     throw new InvalidOperationException("Not connected to the console; start the bot first.");
                 if (_dirty || !Connection.Connected || Connection.Available > 0)
@@ -316,7 +319,9 @@ namespace SysBot.Base
             }
         }
 
-        public async Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token)
+        public Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token) => ReadRaw(command, length, token, null);
+
+        private async Task<byte[]> ReadRaw(byte[] command, int length, CancellationToken token, Stopwatch? timer)
         {
             return await RetryOperation(ct => ExchangeAsync(command, async t =>
             {
@@ -325,7 +330,14 @@ namespace SysBot.Base
                 if (buffer[received - 1] != (byte)'\n')
                     throw new IOException($"The console sent a reply longer than {length} bytes.");
                 return buffer;
-            }, ct), token).ConfigureAwait(false);
+            }, ct, timer), token).ConfigureAwait(false);
+        }
+
+        public async Task<TimeSpan> PingAsync(CancellationToken token)
+        {
+            var answered = new Stopwatch();
+            await ReadRaw(SwitchCommand.GetTitleID(), 17, token, answered).ConfigureAwait(false);
+            return answered.Elapsed;
         }
 
         /// <summary>

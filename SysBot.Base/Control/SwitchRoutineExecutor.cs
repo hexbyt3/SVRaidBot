@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -57,14 +56,14 @@ namespace SysBot.Base
 
         // A healthy answer takes well under a second. One that needed a retry means the
         // connection was replaced, and a press still queued on the old one was lost.
+        // Waiting behind a Discord screenshot on the same connection doesn't count.
         public static TimeSpan PressConfirmLimit { get; set; } = TimeSpan.FromSeconds(1.5);
 
         private async Task ConfirmPress(CancellationToken token)
         {
-            var waited = Stopwatch.StartNew();
-            await SwitchConnection.GetTitleID(token).ConfigureAwait(false);
-            if (waited.Elapsed > PressConfirmLimit)
-                throw new PressNotConfirmedException($"The console took {waited.Elapsed.TotalSeconds:0.0} seconds to confirm a button press.");
+            var answered = await SwitchConnection.PingAsync(token).ConfigureAwait(false);
+            if (answered > PressConfirmLimit)
+                throw new PressNotConfirmedException($"The console took {answered.TotalSeconds:0.0} seconds to confirm a button press.");
         }
 
         public async Task SetStick(SwitchStick stick, short x, short y, int delay, CancellationToken token)

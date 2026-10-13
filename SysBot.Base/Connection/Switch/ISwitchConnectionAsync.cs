@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -14,6 +15,12 @@ public interface ISwitchConnectionAsync : IConsoleConnectionAsync
     Task<ulong> GetHeapBaseAsync(CancellationToken token);
 
     Task<string> GetTitleID(CancellationToken token);
+
+    /// <summary>
+    /// Asks the console for its title ID and returns how long the answer took, not counting
+    /// time spent waiting for other commands on the connection to finish first.
+    /// </summary>
+    Task<TimeSpan> PingAsync(CancellationToken token);
 
     Task<string> GetBotbaseVersion(CancellationToken token);
 

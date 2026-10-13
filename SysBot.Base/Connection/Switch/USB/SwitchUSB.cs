@@ -1,6 +1,7 @@
 ﻿using LibUsbDotNet;
 using LibUsbDotNet.Main;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -131,6 +132,16 @@ namespace SysBot.Base
             {
                 SendInternal(command);
                 return ReadBulkUSB();
+            }
+        }
+
+        protected TimeSpan TimeExchange(byte[] command)
+        {
+            lock (_sync)
+            {
+                var answered = Stopwatch.StartNew();
+                Exchange(command);
+                return answered.Elapsed;
             }
         }
 

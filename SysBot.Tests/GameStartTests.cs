@@ -27,6 +27,7 @@ namespace SysBot.Tests
             public bool GameRunning;
             public bool StartsFromFirstTile = true;
             public int TitleReplyDelay;
+            public int ScreenshotDelay;
             public int Language = 1;
             private int _leftPresses;
 
@@ -63,6 +64,12 @@ namespace SysBot.Tests
                     else if (line == "click A" && StartsFromFirstTile && _leftPresses >= 15)
                         GameRunning = true;
 
+                    if (line == "pixelPeek")
+                    {
+                        await Task.Delay(ScreenshotDelay);
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes("0102\n"));
+                        continue;
+                    }
                     if (line == "getSystemLanguage")
                     {
                         await stream.WriteAsync(Encoding.ASCII.GetBytes(Language + "\n"));
@@ -119,6 +126,27 @@ namespace SysBot.Tests
             await bot.ClickConfirmed(SwitchButton.B, 0, CancellationToken.None);
             await bot.PressAndHoldConfirmed(SwitchButton.DDOWN, 50, 0, CancellationToken.None);
             fake.Commands.Should().Equal("click B", "getTitleID", "press DDOWN", "getTitleID", "release DDOWN", "getTitleID");
+            bot.Connection.Disconnect();
+            fake.Listener.Stop();
+        }
+
+        // A screenshot for Discord holds the connection for a few seconds. A press
+        // confirmation that waits its turn behind one is not the console being slow.
+        [Fact]
+        public async Task WaitingBehindAScreenshotIsNotCountedAsASlowAnswer()
+        {
+            var fake = new FakeSwitch { ScreenshotDelay = 2_000 };
+            var bot = Connect(fake);
+            var screenshot = bot.Connection.PixelPeek(CancellationToken.None);
+            var deadline = DateTime.Now.AddSeconds(5);
+            while (!fake.Commands.Contains("pixelPeek") && DateTime.Now < deadline)
+                await Task.Delay(20);
+
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            var answered = await ((ISwitchConnectionAsync)bot.Connection).PingAsync(CancellationToken.None);
+            waited.Elapsed.Should().BeGreaterThan(TimeSpan.FromSeconds(1.5));
+            answered.Should().BeLessThan(SwitchRoutineExecutor<PokeBotState>.PressConfirmLimit);
+            (await screenshot).Should().Equal(1, 2);
             bot.Connection.Disconnect();
             fake.Listener.Stop();
         }
