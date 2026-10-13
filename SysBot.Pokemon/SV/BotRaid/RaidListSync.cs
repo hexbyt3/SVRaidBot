@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Globalization;
 using static SysBot.Pokemon.RotatingRaidSettingsSV;
 
 namespace SysBot.Pokemon
@@ -46,6 +47,26 @@ namespace SysBot.Pokemon
                 }
                 return removed;
             }
+        }
+
+        /// <summary>
+        /// Marks every raid whose seed is not a hex number for removal and
+        /// returns the ones newly marked. They leave the list in <see cref="RemovePending"/>.
+        /// </summary>
+        public static List<RotatingRaidParameters> MarkUnreadableSeeds(List<RotatingRaidParameters> list)
+        {
+            var marked = new List<RotatingRaidParameters>();
+            lock (Gate)
+            {
+                foreach (var raid in list)
+                {
+                    if (raid.PendingRemoval || uint.TryParse(raid.Seed, NumberStyles.AllowHexSpecifier, null, out _))
+                        continue;
+                    raid.PendingRemoval = true;
+                    marked.Add(raid);
+                }
+            }
+            return marked;
         }
     }
 }

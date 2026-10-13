@@ -5,41 +5,29 @@ using System.IO;
 
 public class UserRequestManager
 {
-    private Dictionary<ulong, UserRequestInfo> userRequests = new();
-    private readonly string filePath;
-
-    public UserRequestManager()
-    {
-        var baseDirectory = AppDomain.CurrentDomain.BaseDirectory; // Or another method to determine the base directory
-        var directoryPath = Path.Combine(baseDirectory, "raidfilessv");
-        Directory.CreateDirectory(directoryPath);
-        filePath = Path.Combine(directoryPath, "user_requests.json");
-        lock (FileLock)
-            Load();
-    }
-
-    private void Load()
-    {
-        if (File.Exists(filePath))
-        {
-            var json = File.ReadAllText(filePath);
-            userRequests = JsonConvert.DeserializeObject<Dictionary<ulong, UserRequestInfo>>(json) ?? new Dictionary<ulong, UserRequestInfo>();
-        }
-        else
-        {
-            userRequests = new Dictionary<ulong, UserRequestInfo>();
-            Save();
-        }
-    }
-
-    public void Save()
-    {
-        var json = JsonConvert.SerializeObject(userRequests);
-        File.WriteAllText(filePath, json);
-    }
-
-    // Commands run on several threads and each one reads and writes the same file.
+    // Commands run on several threads and each makes its own manager, so the
+    // counts are kept once for the program and written back under this lock.
     private static readonly object FileLock = new();
+    private static Dictionary<ulong, UserRequestInfo>? userRequests;
+
+    private static readonly string filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "raidfilessv", "user_requests.json");
+
+    private static Dictionary<ulong, UserRequestInfo> Requests
+    {
+        get
+        {
+            if (userRequests is not null)
+                return userRequests;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+            userRequests = File.Exists(filePath)
+                ? JsonConvert.DeserializeObject<Dictionary<ulong, UserRequestInfo>>(File.ReadAllText(filePath)) ?? []
+                : [];
+            return userRequests;
+        }
+    }
+
+    private static void Save() => File.WriteAllText(filePath, JsonConvert.SerializeObject(Requests));
 
     /// <summary>
     /// Whether the user may request now. Does not count anything; call
@@ -48,10 +36,12 @@ public class UserRequestManager
     public bool CanRequest(ulong userId, int limit, int cooldown, out TimeSpan remainingCooldown)
     {
         remainingCooldown = TimeSpan.Zero;
+        if (limit <= 0)
+            return true;
+
         lock (FileLock)
         {
-            Load();
-            if (!userRequests.TryGetValue(userId, out var info) || info.RequestCount < limit)
+            if (!Requests.TryGetValue(userId, out var info) || info.RequestCount < limit)
                 return true;
 
             var timeSinceLimit = DateTime.UtcNow - info.RequestLimitTime;
@@ -69,13 +59,15 @@ public class UserRequestManager
     /// </summary>
     public void RecordRequest(ulong userId, int limit, int cooldown)
     {
+        if (limit <= 0)
+            return;
+
         lock (FileLock)
         {
-            Load();
-            if (!userRequests.TryGetValue(userId, out var info))
+            if (!Requests.TryGetValue(userId, out var info))
             {
                 info = new UserRequestInfo { UserId = userId };
-                userRequests.Add(userId, info);
+                Requests.Add(userId, info);
             }
             else if (info.RequestCount >= limit && DateTime.UtcNow - info.RequestLimitTime >= TimeSpan.FromMinutes(cooldown))
             {
