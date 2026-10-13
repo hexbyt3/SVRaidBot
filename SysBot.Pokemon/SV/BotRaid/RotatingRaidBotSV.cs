@@ -136,10 +136,6 @@ namespace SysBot.Pokemon.SV.BotRaid
         private int _consecutiveDenFailures = 0;
         private int _lastFailedDenIndex = -1;
 
-        // The longest normal recovery (two mismatches, a map refresh, another
-        // mismatch and three teleport retries) is seven restarts.
-        private const int MaxTriesWithoutLobby = 10;
-        private int _triesWithoutLobby;
         private bool _pickFirstRaid;
 
         private enum LobbyOutcome { Ready, Empty, Banned }
@@ -895,13 +891,11 @@ namespace SysBot.Pokemon.SV.BotRaid
                         if (prepareResult == 0)
                             continue;
 
-                        // 2 means the game was restarted or the map refreshed to get the den
-                        // ready. That can go on forever when the seed never shows up here.
+                        // 2 means the game was restarted to get the den ready (seed reloaded,
+                        // teleport retry, map refresh) or the bot is paused.
                         if (prepareResult == 2)
                         {
                             consecutiveErrors = 0;
-                            if (!_isPaused && ++_triesWithoutLobby >= MaxTriesWithoutLobby)
-                                await GiveUpOnRaid(token).ConfigureAwait(false);
                             continue;
                         }
 
@@ -910,7 +904,6 @@ namespace SysBot.Pokemon.SV.BotRaid
                             continue;
                         }
 
-                        _triesWithoutLobby = 0;
                         _consecutiveDenFailures = 0;
                         _lastFailedDenIndex = -1;
                         // A lobby opened, so earlier errors were not one ongoing fault.
@@ -948,7 +941,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                             else
                             {
                                 // The console is still sitting in the lobby; leave it before trying again.
-                                await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
+                                await RestartGameWithSeed(token).ConfigureAwait(false);
                             }
 
                             continue;
@@ -1235,7 +1228,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 if (!await EnsureInRaid(token))
                 {
                     Log("Failed to enter raid, restarting game.");
-                    await ReOpenGame(_hub.Config, token);
+                    await RestartGameWithSeed(token).ConfigureAwait(false);
                     return false;
                 }
 
@@ -1292,6 +1285,15 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// <summary>
         /// Performs a reboot and reset of the game when an error occurs
         /// </summary>
+        // A plain reopen comes back on the den's own raid, so the check after going online
+        // always failed and cost a second restart. Load the raid's seed on the way back in.
+        // Not used by PerformRebootAndReset: StartGameRaid calls that when the game won't load.
+        private async Task RestartGameWithSeed(CancellationToken token)
+        {
+            await CloseGame(_hub.Config, token).ConfigureAwait(false);
+            await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
+        }
+
         private async Task PerformRebootAndReset(CancellationToken t)
         {
             // A reboot that keeps failing gets a full bot restart (new connection,
@@ -1323,21 +1325,18 @@ namespace SysBot.Pokemon.SV.BotRaid
         }
 
         /// <summary>
-        /// The den never came up after many restarts. A request or mystery raid is
-        /// dropped; a configured raid gets a full reboot.
+        /// The seed was loaded again and the den still didn't hold it after going online.
+        /// That should never happen, so the owner is told and the raid is skipped.
         /// </summary>
         private async Task GiveUpOnRaid(CancellationToken token)
         {
-            _triesWithoutLobby = 0;
+            _seedMismatchCount = 0;
             var raid = _settings.ActiveRaids[_currentRaidIndex];
-            if (!IsTemporaryRaid())
-            {
-                Log($"No lobby for {RaidName(raid)} after {MaxTriesWithoutLobby} restarts. Rebooting the game.");
-                await PerformRebootAndReset(token).ConfigureAwait(false);
-                return;
-            }
+            var problem = $"The den at index {_seedIndexToReplace} ({CurrentMap}) still didn't hold {RaidName(raid)}'s seed {raid.Seed} after loading it twice. Skipping this raid.";
+            Log(problem);
+            EchoUtil.AlertOwner($"The raid bot on the Switch at {Connection.Name} could not load a raid. {problem} " +
+                "This should not happen; please send the log to the developer.");
 
-            Log($"No lobby for {RaidName(raid)} after {MaxTriesWithoutLobby} restarts. Skipping it.");
             if (raid.WebRequest is { } web)
             {
                 web.OutcomeOverride = web.IsHosted
@@ -1371,14 +1370,14 @@ namespace SysBot.Pokemon.SV.BotRaid
                 if (token.IsCancellationRequested || (DateTime.Now - startTime).TotalMinutes > timeoutMinutes)
                 {
                     Log("Timeout reached or cancellation requested, reopening game.");
-                    await ReOpenGame(_hub.Config, token);
+                    await RestartGameWithSeed(token).ConfigureAwait(false);
                     return false;
                 }
 
                 if (!await IsConnectedToLobby(token).ConfigureAwait(false))
                 {
                     Log("Lost connection to lobby, reopening game.");
-                    await ReOpenGame(_hub.Config, token);
+                    await RestartGameWithSeed(token).ConfigureAwait(false);
                     return false;
                 }
 
@@ -1488,7 +1487,7 @@ namespace SysBot.Pokemon.SV.BotRaid
 
                 if (!success)
                 {
-                    await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
+                    await RestartGameWithSeed(token).ConfigureAwait(false);
                     return false;
                 }
             }
@@ -2593,7 +2592,7 @@ namespace SysBot.Pokemon.SV.BotRaid
 
                 // A new raid starts its own count toward the skip limit.
                 _lostRaid = 0;
-                _triesWithoutLobby = 0;
+                _seedMismatchCount = 0;
                 _firstRun = false;
 
                 string raidIdentifier = IsMysteryRaid(nextRaid)
@@ -2658,21 +2657,21 @@ namespace SysBot.Pokemon.SV.BotRaid
                     else
                     {
                         Log("Not on overworld (validated pointer check), reopening game.");
-                        await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
+                        await RestartGameWithSeed(token).ConfigureAwait(false);
                         return 0;
                     }
                 }
                 else
                 {
                     Log("Failed to validate overworld pointer, reopening game.");
-                    await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
+                    await RestartGameWithSeed(token).ConfigureAwait(false);
                     return 0;
                 }
             }
             catch (Exception ex)
             {
                 Log($"Error validating overworld pointer: {ex.Message}");
-                await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
+                await RestartGameWithSeed(token).ConfigureAwait(false);
                 return 0;
             }
 
@@ -2713,16 +2712,17 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             if (!seedFound)
             {
-                _seedMismatchCount++;
-                Log($"Raid Den and Current Seed do not match. Mismatch count: {_seedMismatchCount}");
-
-                if (_seedMismatchCount >= 2)
+                // Going online hands the game the current dens, and a new day on the
+                // Switch rebuilds them, so a den can lose the seed it was given. One
+                // reload puts it back; a second miss means something is broken.
+                if (++_seedMismatchCount >= 2)
                 {
-                    Log("Seeds have mismatched 2 times in a row. Refreshing the map.");
-                    _shouldRefreshMap = true;
-                    _seedMismatchCount = 0;
+                    await GiveUpOnRaid(token).ConfigureAwait(false);
                     return 2;
                 }
+                Log(_seedIndexToReplace == -1
+                    ? "No seed has been loaded since the bot started. Loading this raid's seed into the den here."
+                    : "The den lost this raid's seed when the game went online or the Switch started a new day. Loading the seed again.");
 
                 // Replace the den the player is standing at in the online layout.
                 await LogPlayerLocation(token).ConfigureAwait(false);
@@ -2730,10 +2730,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                     await FindSeedIndexInRaids(nearestSeed, token).ConfigureAwait(false);
 
                 await Task.Delay(4_000, token).ConfigureAwait(false);
-                Log("Injecting correct seed.");
-                await CloseGame(_hub.Config, token).ConfigureAwait(false);
-                await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
-                Log("Seed injected Successfully!");
+                await RestartGameWithSeed(token).ConfigureAwait(false);
                 return 2;
             }
 
@@ -3004,7 +3001,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                         Log($"First failure at den index {_seedIndexToReplace}");
                     }
 
-                    await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
+                    await RestartGameWithSeed(token).ConfigureAwait(false);
                     Log("Attempting to restart routine!");
                     return false;
                 }
