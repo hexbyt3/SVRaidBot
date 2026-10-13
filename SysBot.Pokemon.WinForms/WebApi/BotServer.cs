@@ -43,6 +43,14 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
         return reader.ReadToEnd();
     }
 
+    private static async Task WriteTextAsync(HttpListenerResponse response, string text)
+    {
+        var buffer = Encoding.UTF8.GetBytes(text);
+        response.ContentType = "text/plain; charset=utf-8";
+        response.ContentLength64 = buffer.Length;
+        await response.OutputStream.WriteAsync(buffer).ConfigureAwait(false);
+    }
+
     private static string[] GetMachineNames()
     {
         var names = new List<string> { Environment.MachineName };
@@ -53,6 +61,14 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             names.Add(properties.HostName);
             if (!string.IsNullOrWhiteSpace(properties.DomainName))
                 names.Add($"{properties.HostName}.{properties.DomainName}");
+
+            // Home routers hand out their own suffix (attlocal.net, fritz.box, ...).
+            foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                var suffix = adapter.GetIPProperties().DnsSuffix;
+                if (!string.IsNullOrWhiteSpace(suffix))
+                    names.Add($"{properties.HostName}.{suffix}");
+            }
         }
         catch (Exception ex)
         {
@@ -156,6 +172,7 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             if (!PanelRules.IsAllowedHost(request.Headers["Host"], _machineNames))
             {
                 response.StatusCode = 400;
+                await WriteTextAsync(response, "This panel only answers to this PC's IP address or its own name. Open it with http://<PC-IP>:9090").ConfigureAwait(false);
                 return;
             }
 

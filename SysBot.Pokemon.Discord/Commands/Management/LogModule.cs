@@ -49,6 +49,8 @@ namespace SysBot.Pokemon.Discord
 
         private static void AddLogChannel(ISocketMessageChannel c, ulong cid)
         {
+            if (Channels.ContainsKey(cid))
+                return;
             var batcher = new LogBatcher(c);
             Action<string, string> l = (msg, identity) => batcher.Add($"> [{DateTime.Now:HH:mm:ss}] - {identity}: {msg}");
             LogUtil.Forwarders.Add(l);

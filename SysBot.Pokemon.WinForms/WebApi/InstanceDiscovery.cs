@@ -24,6 +24,7 @@ public static class InstanceDiscovery
     private const string Prefix = "SVRaidBot_";
     private const string Extension = ".port";
     private static readonly string[] ProcessNames = ["SVRaidBot", "SysBot.Pokemon.WinForms", "SysBot"];
+    private static readonly string OwnProcessName = Process.GetCurrentProcess().ProcessName;
     private static readonly TimeSpan CacheFor = TimeSpan.FromSeconds(2);
 
     private static readonly object CacheLock = new();
@@ -163,7 +164,8 @@ public static class InstanceDiscovery
         try
         {
             using var process = Process.GetProcessById(pid);
-            if (requireOurName && !ProcessNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase))
+            if (requireOurName && !ProcessNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase)
+                && !process.ProcessName.Equals(OwnProcessName, StringComparison.OrdinalIgnoreCase))
                 return false;
             return process.StartTime <= written.AddMinutes(1);
         }

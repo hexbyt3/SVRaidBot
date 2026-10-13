@@ -454,8 +454,16 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             bool startsWithMention = speciesNameOrUserMention != null && MentionUtils.TryParseUser(speciesNameOrUserMention, out _);
             string? speciesName = startsWithMention ? null : speciesNameOrUserMention;
 
-            // Mentioned users come with the message, so members missing from the cache still count.
-            var invited = Context.MentionedUsersExceptBot().Where(u => u.Id != Context.User.Id && !u.IsBot).ToList();
+            // Only mentions typed in the arguments count: a reply-with-ping also lands in
+            // MentionedUsers. They come with the message, so uncached members still resolve.
+            var typedIds = $"{speciesNameOrUserMention} {invites}"
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Select(word => MentionUtils.TryParseUser(word, out var id) ? id : 0)
+                .Where(id => id != 0)
+                .ToHashSet();
+            var invited = Context.MentionedUsersExceptBot()
+                .Where(u => typedIds.Contains(u.Id) && u.Id != Context.User.Id && !u.IsBot)
+                .ToList();
             if (startsWithMention && invited.Count == 0)
             {
                 await ReplyAsync("I couldn't find anyone to invite in that message. Mention the users you want in your private raid.").ConfigureAwait(false);
@@ -498,7 +506,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             if (raid is null)
                 return;
 
-            var botPrefix = SysCordSettings.MentionOnly ? $"@{Context.Client.CurrentUser.Username} " : SysCordSettings.Settings.CommandPrefix;
+            var botPrefix = SysCordSettings.MentionOnly ? $"{Context.Client.CurrentUser.Mention} " : SysCordSettings.Settings.CommandPrefix;
             var newparam = NewRaid(raid, seed, level, storyProgressLevel);
             newparam.GroupID = raid.GroupId;
             newparam.AddedByRACommand = true;

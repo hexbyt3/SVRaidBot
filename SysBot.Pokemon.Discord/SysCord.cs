@@ -395,7 +395,7 @@ namespace SysBot.Pokemon.Discord
             if (!mgr.CanUseCommandUser(msg.Author.Id))
                 return;
 
-            if (!mgr.CanUseCommandChannel(msg.Channel.Id) && msg.Author.Id != mgr.Owner)
+            if (msg.Channel is not IDMChannel && !mgr.CanUseCommandChannel(msg.Channel.Id) && msg.Author.Id != mgr.Owner)
             {
                 await msg.Channel.SendMessageAsync("You can't use that command here.").ConfigureAwait(false);
                 return;

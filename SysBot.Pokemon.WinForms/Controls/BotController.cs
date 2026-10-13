@@ -265,7 +265,7 @@ namespace SysBot.Pokemon.WinForms
 
             // Fades from green to red the longer the bot goes without logging anything,
             // so a bot that hangs shows it even though nothing new arrives.
-            const int threshold = 100;
+            const int threshold = 300;
             Color good = Color.FromArgb(87, 242, 135); // Green
             if (cfg.Connection.Protocol == SwitchProtocol.USB)
                 good = Color.FromArgb(88, 101, 242); // Blue for USB

@@ -90,5 +90,9 @@ public sealed class LogBatcher : IDisposable
         return messages;
     }
 
-    public void Dispose() => _timer.Dispose();
+    public void Dispose()
+    {
+        _timer.Dispose();
+        _ = FlushAsync();
+    }
 }
