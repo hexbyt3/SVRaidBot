@@ -1,6 +1,5 @@
 ﻿using Discord;
 using Discord.Commands;
-using Discord.Rest;
 using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using PKHeX.Core;
@@ -19,15 +18,12 @@ namespace SysBot.Pokemon.Discord
     {
         public static DiscordManager Manager { get; internal set; } = default!;
         public static DiscordSettings Settings => Manager.Config;
-        public static PokeRaidHubConfig? HubConfig { get; internal set; } = default!;
     }
 
     public sealed class SysCord<T> where T : PKM, new()
     {
         public static PokeBotRunner<T> Runner { get; private set; } = default!;
-        public static RestApplication? App { get; private set; } = default!;
 
-        public static SysCord<T>? Instance { get; private set; }
         public static ReactionService ReactionService { get; private set; } = default!;
         private readonly DiscordSocketClient _client;
         private readonly DiscordManager Manager;
@@ -50,7 +46,6 @@ namespace SysBot.Pokemon.Discord
             Manager = new DiscordManager(Hub.Config.Discord);
 
             SysCordSettings.Manager = Manager;
-            SysCordSettings.HubConfig = Hub.Config;
 
             _client = new DiscordSocketClient(new DiscordSocketConfig
             {
@@ -87,13 +82,7 @@ namespace SysBot.Pokemon.Discord
 
             // Setup your DI container.
             _services = ConfigureServices();
-            Instance = this;
             ReactionService = new ReactionService(_client);
-        }
-
-        public DiscordSocketClient GetClient()
-        {
-            return _client;
         }
 
         // If any services require the client, or the CommandService, or something else you keep on hand,
@@ -181,16 +170,11 @@ namespace SysBot.Pokemon.Discord
 
             var app = await _client.GetApplicationInfoAsync().ConfigureAwait(false);
             Manager.Owner = app.Owner.Id;
-            App = app;
 
             EchoUtil.OwnerForwarders.Clear();
             EchoUtil.OwnerForwarders.Add(msg => app.Owner.SendMessageAsync(msg));
 
-            // Start the connection status check
-            _ = CheckConnectionStatus(token);
-
-            // Wait infinitely so your bot actually stays connected.
-            await MonitorStatusAsync(token).ConfigureAwait(false);
+            await CheckConnectionStatus(token).ConfigureAwait(false);
         }
 
         public async Task InitCommands()
@@ -204,17 +188,6 @@ namespace SysBot.Pokemon.Discord
                 var genModule = t.MakeGenericType(typeof(T));
                 await _commands.AddModuleAsync(genModule, _services).ConfigureAwait(false);
             }
-            var modules = _commands.Modules.ToList();
-
-            foreach (var module in modules)
-            {
-                var name = module.Name;
-                name = name.Replace("Module", "");
-                var gen = name.IndexOf('`');
-                if (gen != -1)
-                    name = name[..gen];
-            }
-
             SharedRaidCodeHandler.UpdateMessageReactionCallback = async (messageId, channelId, isActive) =>
             {
                 try
@@ -428,21 +401,6 @@ namespace SysBot.Pokemon.Discord
             return true;
         }
 
-        private async Task MonitorStatusAsync(CancellationToken token)
-        {
-            UserStatus state = UserStatus.Idle;
-            while (!token.IsCancellationRequested)
-            {
-                var active = UserStatus.Online;
-                if (active != state)
-                {
-                    state = active;
-                    await _client.SetStatusAsync(state).ConfigureAwait(false);
-                }
-                await Task.Delay(20_000, token).ConfigureAwait(false);
-            }
-        }
-
         private async Task LoadLoggingAndEcho()
         {
             if (MessageChannelsLoaded)
@@ -457,6 +415,8 @@ namespace SysBot.Pokemon.Discord
             // Don't let it load more than once in case of Discord hiccups.
             await Log(new LogMessage(LogSeverity.Info, "LoadLoggingAndEcho()", "Logging and Echo channels loaded!")).ConfigureAwait(false);
             MessageChannelsLoaded = true;
+
+            await _client.SetStatusAsync(UserStatus.Online).ConfigureAwait(false);
 
             var game = Hub.Config.Discord.BotGameStatus;
             if (!string.IsNullOrWhiteSpace(game))

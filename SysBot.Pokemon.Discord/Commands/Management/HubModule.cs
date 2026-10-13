@@ -16,9 +16,6 @@ namespace SysBot.Pokemon.Discord
         [Summary("Gets the status of the bot environment.")]
         public async Task GetStatusAsync()
         {
-            var me = SysCord<T>.Runner;
-            var hub = me.Hub;
-
             var builder = new EmbedBuilder
             {
                 Color = Color.Gold,

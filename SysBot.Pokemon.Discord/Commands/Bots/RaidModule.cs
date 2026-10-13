@@ -304,7 +304,6 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 return;
             }
 
-            _ = Array.Empty<byte>();
             byte[]? bytes;
             try
             {

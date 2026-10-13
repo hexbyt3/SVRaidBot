@@ -41,7 +41,6 @@ namespace SysBot.Pokemon.Discord
             public readonly string ChannelName;
             public readonly Action<string> Action;
             public readonly Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>> RaidAction;
-            public string EmbedResult = string.Empty;
 
             public EchoChannel(ulong channelId, string channelName, Action<string> action, Func<byte[]?, string, EmbedBuilder, Task<IUserMessage>> raidAction)
             {
@@ -52,23 +51,7 @@ namespace SysBot.Pokemon.Discord
             }
         }
 
-        private class EncounterEchoChannel
-        {
-            public readonly ulong ChannelID;
-            public readonly string ChannelName;
-            public readonly Action<string, Embed> EmbedAction;
-            public string EmbedResult = string.Empty;
-
-            public EncounterEchoChannel(ulong channelId, string channelName, Action<string, Embed> embedaction)
-            {
-                ChannelID = channelId;
-                ChannelName = channelName;
-                EmbedAction = embedaction;
-            }
-        }
-
         private static readonly Dictionary<ulong, EchoChannel> Channels = new();
-        private static readonly Dictionary<ulong, EncounterEchoChannel> EncounterChannels = new();
 
         public static void RestoreChannels(DiscordSocketClient discord, DiscordSettings cfg)
         {
@@ -287,12 +270,6 @@ namespace SysBot.Pokemon.Discord
         {
             var cid = c.Id;
             return Channels.TryGetValue(cid, out _);
-        }
-
-        public static bool IsEmbedEchoChannel(ISocketMessageChannel c)
-        {
-            var cid = c.Id;
-            return EncounterChannels.TryGetValue(cid, out _);
         }
 
         [Command("echoInfo")]

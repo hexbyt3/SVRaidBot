@@ -73,10 +73,5 @@ namespace SysBot.Pokemon
                 ? (AllowIfEmpty ? "Anyone allowed" : "None allowed (none specified).")
                 : $"{List.Count} entries specified.";
         }
-
-        /// <summary>
-        /// Gets an enumerable summary of the items in this object.
-        /// </summary>
-        public IEnumerable<string> Summarize() => List.Select(z => z.ToString());
     }
 }

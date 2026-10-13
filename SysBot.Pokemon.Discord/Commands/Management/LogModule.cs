@@ -11,12 +11,7 @@ namespace SysBot.Pokemon.Discord
 {
     public class LogModule : ModuleBase<SocketCommandContext>
     {
-        private class LogAction : ChannelAction<string, string>
-        {
-            public LogAction(ulong id, Action<string, string> messager, string channel) : base(id, messager, channel)
-            {
-            }
-        }
+        private sealed record LogAction(ulong ChannelID, Action<string, string> Action, string ChannelName);
 
         private static readonly Dictionary<ulong, LogAction> Channels = new();
 
