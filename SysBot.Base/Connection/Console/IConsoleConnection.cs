@@ -1,4 +1,7 @@
-﻿namespace SysBot.Base
+﻿using System.Threading;
+using System.Threading.Tasks;
+
+namespace SysBot.Base
 {
     /// <summary>
     /// Concepts and properties to describe a connection with a console, without explicitly interacting with it.
@@ -18,7 +21,7 @@
         /// <summary>
         /// Connects to the device.
         /// </summary>
-        void Connect();
+        Task ConnectAsync(CancellationToken token);
 
         /// <summary>
         /// Resets the connection to the device, usually by calling <see cref="Disconnect"/> then <see cref="Connect"/> in a clean manner.

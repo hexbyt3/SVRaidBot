@@ -28,71 +28,81 @@ namespace SysBot.Base
             return new SwitchSocketAsync(cfg);
         }
 
-        public override void Connect()
+        private const int MaxConnectAttempts = 10;
+
+        public override async Task ConnectAsync(CancellationToken token)
         {
-            if (Connected)
+            await _io.WaitAsync(token).ConfigureAwait(false);
+            try
             {
-                Log("Already connected prior, skipping initial connection.");
-                return;
-            }
-
-            Log("Connecting to device...");
-            _closedByOwner = false;
-            int retryCount = 0;
-            const int maxRetries = 10;
-
-            while (retryCount < maxRetries)
-            {
-                try
+                _closedByOwner = false;
+                if (Connection.Connected)
                 {
-                    IAsyncResult result = Connection.BeginConnect(Info.IP, Info.Port, null, null);
-                    bool success = result.AsyncWaitHandle.WaitOne(5000, true);
-                    if (!success || !Connection.Connected)
-                    {
-                        throw new Exception("Failed to connect to device.");
-                    }
-                    Connection.EndConnect(result);
-                    Log("Connected!");
-                    Label = Name;
+                    Log("Already connected prior, skipping initial connection.");
                     return;
                 }
-                catch (Exception ex)
+
+                Log("Connecting to device...");
+                for (int attempt = 1; ; attempt++)
                 {
-                    // A timed-out BeginConnect is still pending on this socket; retry on a new one.
-                    CloseQuietly();
-                    InitializeSocket();
-                    retryCount++;
-                    Log($"Connection attempt {retryCount} failed: {ex.Message}");
-                    if (retryCount >= maxRetries)
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    timeout.CancelAfter(ConnectTimeout);
+                    try
                     {
-                        throw;
+                        await Connection.ConnectAsync(Info.IP, Info.Port, timeout.Token).ConfigureAwait(false);
+                        break;
                     }
-                    Task.Delay(1000 * retryCount).Wait(); // Wait before retrying
+                    catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+                    {
+                        // A connect that failed or timed out leaves the socket unusable; retry on a new one.
+                        CloseQuietly();
+                        InitializeSocket();
+                        token.ThrowIfCancellationRequested();
+                        Log($"Connection attempt {attempt} failed: {(ex is OperationCanceledException ? "timed out" : ex.Message)}");
+                        if (attempt >= MaxConnectAttempts)
+                            throw new IOException($"Could not connect to the console at {Info.IP}:{Info.Port}.", ex);
+                        await Task.Delay(1000 * attempt, token).ConfigureAwait(false);
+                    }
                 }
+                _dirty = false;
+                Log("Connected!");
+                Label = Name;
+            }
+            finally
+            {
+                _io.Release();
             }
         }
 
         public override void Reset()
         {
-            if (Connected)
-                Disconnect();
-            else
-                InitializeSocket();
-            Connect();
+            Disconnect();
+            ConnectAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         public override void Disconnect()
         {
-            Log("Disconnecting from device...");
-            if (Connection.Connected)
-            {
-                try { Connection.Shutdown(SocketShutdown.Both); } catch { }
-            }
-            CloseQuietly();
-            InitializeSocket();
-            _dirty = false;
+            // Closed first, so a command that slips in once the socket is gone can't reopen it.
             _closedByOwner = true;
-            Log("Disconnected! Resetting Socket.");
+            // An exchange still running is let finish first, so it isn't cut off halfway.
+            bool idle = _io.Wait(ConnectTimeout + ScreenshotTimeout);
+            try
+            {
+                Log("Disconnecting from device...");
+                if (Connection.Connected)
+                {
+                    try { Connection.Shutdown(SocketShutdown.Both); } catch { }
+                }
+                CloseQuietly();
+                InitializeSocket();
+                _dirty = false;
+                Log("Disconnected! Resetting Socket.");
+            }
+            finally
+            {
+                if (idle)
+                    _io.Release();
+            }
         }
 
         private void CloseQuietly()
@@ -114,10 +124,12 @@ namespace SysBot.Base
         // the next stray command quietly reopening sys-botbase's only connection.
         private volatile bool _closedByOwner;
         public TimeSpan ReplyTimeout { get; set; } = TimeSpan.FromSeconds(10);
+        // A screenshot can be up to a megabyte of hex text, which a weak Wi-Fi link takes a while to move.
+        public TimeSpan ScreenshotTimeout { get; set; } = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
 
         // A running timer keeps running through retries, so a retried exchange counts its backoff too.
-        private async Task<T> ExchangeAsync<T>(byte[] command, Func<CancellationToken, ValueTask<T>> receive, CancellationToken token, Stopwatch? timer = null)
+        private async Task<T> ExchangeAsync<T>(byte[] command, Func<CancellationToken, ValueTask<T>> receive, CancellationToken token, Stopwatch? timer = null, TimeSpan? replyTimeout = null)
         {
             await _io.WaitAsync(token).ConfigureAwait(false);
             try
@@ -129,7 +141,7 @@ namespace SysBot.Base
                     await ReconnectAsync(token).ConfigureAwait(false);
 
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                timeout.CancelAfter(ReplyTimeout);
+                timeout.CancelAfter(replyTimeout ?? ReplyTimeout);
                 try
                 {
                     await Connection.SendAsync(command, SocketFlags.None, timeout.Token).ConfigureAwait(false);
@@ -386,12 +398,11 @@ namespace SysBot.Base
             // No retry: a missed screenshot only costs the embed its picture.
             try
             {
-                var data = await ExchangeAsync(SwitchCommand.PixelPeek(), ReceiveLineAsync, token).ConfigureAwait(false);
+                var data = await ExchangeAsync(SwitchCommand.PixelPeek(), ReceiveLineAsync, token, replyTimeout: ScreenshotTimeout).ConfigureAwait(false);
                 return Decoder.ConvertHexByteStringToBytes(data);
             }
             catch (Exception ex) when (ex is IOException or SocketException or ArgumentOutOfRangeException)
             {
-                _dirty = true;
                 LogError($"Could not read the screenshot: {ex.Message}");
                 return [];
             }

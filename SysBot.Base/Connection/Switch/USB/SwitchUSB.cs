@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace SysBot.Base
 {
@@ -47,7 +48,9 @@ namespace SysBot.Base
             Connect();
         }
 
-        public void Connect()
+        public Task ConnectAsync(CancellationToken token) => Task.Run(Connect, token);
+
+        private void Connect()
         {
             SwDevice = TryFindUSB();
             if (SwDevice == null)

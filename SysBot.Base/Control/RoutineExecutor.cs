@@ -38,7 +38,7 @@ namespace SysBot.Base
         /// <param name="token">Cancel this token to have the bot stop looping.</param>
         public async Task RunAsync(CancellationToken token)
         {
-            Connection.Connect();
+            await Connection.ConnectAsync(token).ConfigureAwait(false);
             try
             {
                 Log("Initializing connection with console...");
@@ -53,7 +53,7 @@ namespace SysBot.Base
 
         public async Task RebootAndStopAsync(CancellationToken token)
         {
-            Connection.Connect();
+            await Connection.ConnectAsync(token).ConfigureAwait(false);
             try
             {
                 await InitialStartup(token).ConfigureAwait(false);
