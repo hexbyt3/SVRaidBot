@@ -15,6 +15,8 @@ namespace SysBot.Pokemon.SV.BotRaid.Helpers
         // Every request the panel sends is a few dozen bytes of JSON.
         public const int MaxBodyBytes = 4096;
 
+        private static readonly string[] PrivateSuffixes = [".lan", ".home", ".internal", ".localdomain", ".home.arpa", ".ts.net"];
+
         /// <summary>
         /// A page on some other site can point its own host name at this PC (DNS
         /// rebinding) and then read the panel as if it were that site. Its requests still
@@ -34,8 +36,15 @@ namespace SysBot.Pokemon.SV.BotRaid.Helpers
                 return false;
 
             var name = uri.IdnHost.TrimEnd('.');
-            return name.Equals("localhost", StringComparison.OrdinalIgnoreCase)
-                || machineNames.Any(m => !string.IsNullOrWhiteSpace(m) && name.Equals(m.TrimEnd('.'), StringComparison.OrdinalIgnoreCase));
+            if (!name.Contains('.') || name.EndsWith(".local", StringComparison.OrdinalIgnoreCase))
+                return true; // LAN names; a rebinding site needs a public domain
+
+            // This PC under a private suffix, e.g. mypc.lan or mypc.tailnet.ts.net
+            var firstLabel = name[..name.IndexOf('.')];
+            bool privateSuffix = PrivateSuffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase));
+            return machineNames.Any(m => !string.IsNullOrWhiteSpace(m)
+                && (name.Equals(m.TrimEnd('.'), StringComparison.OrdinalIgnoreCase)
+                    || (privateSuffix && firstLabel.Equals(m.Split('.')[0], StringComparison.OrdinalIgnoreCase))));
         }
 
         /// <summary>

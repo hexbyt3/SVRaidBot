@@ -21,6 +21,9 @@ namespace SysBot.Tests
         [InlineData("raidpc:9090")]
         [InlineData("RaidPC.home.lan.:9090")]
         [InlineData("raidpc.local")]
+        [InlineData("othername.local")]
+        [InlineData("raidpc.tail1234.ts.net")]
+        [InlineData("raidpc.lan")]
         [InlineData(null)]
         public void LocalNamesAndAnyIpAreAllowed(string? host)
         {
@@ -31,6 +34,7 @@ namespace SysBot.Tests
         [Theory]
         [InlineData("evil.example.com:9090")]
         [InlineData("raidpc.evil.example.com")]
+        [InlineData("otherpc.tail1234.ts.net")]
         [InlineData("localhost.evil.example.com")]
         [InlineData("not a host")]
         public void ForeignNamesAreRejected(string host)
