@@ -36,4 +36,18 @@ namespace SysBot.Tests
             convert.SequenceEqual(expect).Should().BeTrue();
         }
     }
+
+    public class UsbReplyTests
+    {
+        // usb-botbase sends a reply's length before the reply. A garbled length must not
+        // become a 2 GB allocation or a negative one.
+        [Theory]
+        [InlineData(0, true)]
+        [InlineData(8, true)]
+        [InlineData(400_000, true)]
+        [InlineData(-1, false)]
+        [InlineData(int.MaxValue, false)]
+        public void GarbledReplyLengthIsRejected(int size, bool plausible) =>
+            SwitchUSB.IsPlausibleReplySize(size).Should().Be(plausible);
+    }
 }

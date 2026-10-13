@@ -74,6 +74,7 @@ namespace SysBot.Base
 
                 reader = SwDevice.OpenEndpointReader(ReadEndpointID.Ep01);
                 writer = SwDevice.OpenEndpointWriter(WriteEndpointID.Ep01);
+                Connected = true;
             }
         }
 
@@ -115,6 +116,10 @@ namespace SysBot.Base
 
                 reader?.Dispose();
                 writer?.Dispose();
+                reader = null;
+                writer = null;
+                SwDevice = null;
+                Connected = false;
             }
         }
 
@@ -156,6 +161,12 @@ namespace SysBot.Base
 
         protected byte[] Read(ulong offset, int length, Func<ulong, int, byte[]> method) => Exchange(method(offset, length));
 
+        // The biggest real replies are screenshots and event data, a few hundred KB at most.
+        // A length past this is a garbled header, not something to allocate.
+        public const int MaxReplySize = 16 * 1024 * 1024;
+
+        public static bool IsPlausibleReplySize(int size) => size is >= 0 and <= MaxReplySize;
+
         private int ReadReplySize()
         {
             byte[] sizeOfReturn = new byte[4];
@@ -165,7 +176,13 @@ namespace SysBot.Base
                 Disconnect();
                 throw new IOException($"The console did not say how long its reply is ({ec}).");
             }
-            return BitConverter.ToInt32(sizeOfReturn, 0);
+            int size = BitConverter.ToInt32(sizeOfReturn, 0);
+            if (!IsPlausibleReplySize(size))
+            {
+                Disconnect();
+                throw new IOException($"The console announced a {size}-byte reply, which can't be right.");
+            }
+            return size;
         }
 
         protected byte[] ReadBulkUSB()
@@ -178,22 +195,21 @@ namespace SysBot.Base
                 if (reader == null)
                     throw new Exception("USB device not found or not connected.");
 
-                // Let usb-botbase tell us the response size.
+                // usb-botbase sends the reply's length first, then the reply.
                 int size = ReadReplySize();
                 byte[] buffer = new byte[size];
-
-                // Loop until we have read everything.
-                int transfSize = 0;
-                while (transfSize < size)
+                int read = 0;
+                while (read < size)
                 {
                     Thread.Sleep(1);
-                    var ec = reader.Read(buffer, transfSize, Math.Min(reader.ReadBufferSize, size - transfSize), 5000, out int lenVal);
-                    if (ec != ErrorCode.None)
+                    var ec = reader.Read(buffer, read, Math.Min(reader.ReadBufferSize, size - read), 5000, out int got);
+                    // A read that reports no error but no bytes either would otherwise spin here forever.
+                    if (ec != ErrorCode.None || got <= 0)
                     {
                         Disconnect();
-                        throw new Exception(UsbDevice.LastErrorString);
+                        throw new IOException($"The console stopped partway through its reply ({read} of {size} bytes, {ec}).");
                     }
-                    transfSize += lenVal;
+                    read += got;
                 }
                 return buffer;
             }
@@ -248,30 +264,17 @@ namespace SysBot.Base
             }
         }
 
+        // A missed screenshot only costs the embed its picture; a half-read one would show as a broken image.
         protected byte[] PixelPeekUSB()
         {
-            Thread.Sleep(1);
-            lock (_sync)
+            try
             {
-                if (reader == null)
-                    throw new Exception("USB device not found or not connected.");
-
-                int size = ReadReplySize();
-                byte[] buffer = new byte[size];
-                int transfSize = 0;
-                while (transfSize < size)
-                {
-                    Thread.Sleep(1);
-                    var ec = reader.Read(buffer, transfSize, Math.Min(reader.ReadBufferSize, size - transfSize), 5000, out int lenVal);
-                    if (ec != ErrorCode.None)
-                    {
-                        LogError($"Error while getting screenshot: {UsbDevice.LastErrorString}");
-                        Disconnect();
-                        break;
-                    }
-                    transfSize += lenVal;
-                }
-                return buffer;
+                return ReadBulkUSB();
+            }
+            catch (IOException ex)
+            {
+                LogError($"Could not read the screenshot: {ex.Message}");
+                return [];
             }
         }
     }
