@@ -6,9 +6,9 @@ namespace SysBot.Base
     /// Tracks the state of the bot and what it should execute next.
     /// </summary>
     [Serializable]
-    public abstract class BotState<TEnum, TConnection> : IConsoleBotManaged<IConsoleConnection, IConsoleConnectionAsync>
+    public abstract class BotState<TEnum, TConnection> : IConsoleBotManaged<IConsoleConnectionAsync>
         where TEnum : struct, Enum
-        where TConnection : IConsoleBotManaged<IConsoleConnection, IConsoleConnectionAsync>, new()
+        where TConnection : IConsoleBotManaged<IConsoleConnectionAsync>, new()
     {
         /// <summary>
         /// Connection Configuration; should always be initialized.
@@ -25,9 +25,6 @@ namespace SysBot.Base
 
         /// <inheritdoc/>
         public bool Matches(string magic) => Connection.Matches(magic);
-
-        /// <inheritdoc/>
-        public IConsoleConnection CreateSync() => Connection.CreateSync();
 
         /// <inheritdoc/>
         public IConsoleConnectionAsync CreateAsynchronous() => Connection.CreateAsynchronous();

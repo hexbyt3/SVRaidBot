@@ -9,7 +9,7 @@ namespace SysBot.Pokemon
     {
         public const decimal BotbaseVersion = 2.4m;
 
-        protected PokeRoutineExecutorBase(IConsoleBotManaged<IConsoleConnection, IConsoleConnectionAsync> cfg) : base(cfg)
+        protected PokeRoutineExecutorBase(IConsoleBotManaged<IConsoleConnectionAsync> cfg) : base(cfg)
         {
         }
 

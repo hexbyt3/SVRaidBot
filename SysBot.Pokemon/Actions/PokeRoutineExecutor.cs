@@ -10,13 +10,9 @@ namespace SysBot.Pokemon
 {
     public abstract class PokeRoutineExecutor<T> : PokeRoutineExecutorBase where T : PKM, new()
     {
-        protected PokeRoutineExecutor(IConsoleBotManaged<IConsoleConnection, IConsoleConnectionAsync> cfg) : base(cfg)
+        protected PokeRoutineExecutor(IConsoleBotManaged<IConsoleConnectionAsync> cfg) : base(cfg)
         {
         }
-
-        public abstract Task<T> ReadPokemon(ulong offset, CancellationToken token);
-
-        public abstract Task<T> ReadPokemon(ulong offset, int size, CancellationToken token);
 
         protected async Task<(bool, ulong)> ValidatePointerAll(IEnumerable<long> jumps, CancellationToken token)
         {

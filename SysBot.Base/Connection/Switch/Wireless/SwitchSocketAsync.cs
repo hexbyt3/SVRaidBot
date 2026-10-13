@@ -2,7 +2,6 @@
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -228,12 +227,6 @@ namespace SysBot.Base
 
         public async Task<byte[]> ReadBytesAbsoluteAsync(ulong offset, int length, CancellationToken token) => await Read(offset, length, Absolute, token).ConfigureAwait(false);
 
-        public async Task<byte[]> ReadBytesMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => await ReadMulti(offsetSizes, Heap, token).ConfigureAwait(false);
-
-        public async Task<byte[]> ReadBytesMainMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => await ReadMulti(offsetSizes, Main, token).ConfigureAwait(false);
-
-        public async Task<byte[]> ReadBytesAbsoluteMultiAsync(IReadOnlyDictionary<ulong, int> offsetSizes, CancellationToken token) => await ReadMulti(offsetSizes, Absolute, token).ConfigureAwait(false);
-
         public async Task WriteBytesAsync(byte[] data, uint offset, CancellationToken token) => await Write(data, offset, Heap, token).ConfigureAwait(false);
 
         public async Task WriteBytesMainAsync(byte[] data, ulong offset, CancellationToken token) => await Write(data, offset, Main, token).ConfigureAwait(false);
@@ -304,14 +297,6 @@ namespace SysBot.Base
             return result;
         }
 
-        private async Task<byte[]> ReadMulti(IReadOnlyDictionary<ulong, int> offsetSizes, SwitchOffsetType type, CancellationToken token)
-        {
-            var method = type.GetReadMultiMethod();
-            var cmd = method(offsetSizes);
-            var totalSize = offsetSizes.Values.Sum();
-            return await ReadBytesFromCmdAsync(cmd, totalSize, token).ConfigureAwait(false);
-        }
-
         private async Task Write(byte[] data, ulong offset, SwitchOffsetType type, CancellationToken token)
         {
             var method = type.GetWriteMethod();
@@ -367,11 +352,6 @@ namespace SysBot.Base
             return read;
         }
 
-        public async Task SendRaw(byte[] command, CancellationToken token)
-        {
-            await SendAsync(command, token).ConfigureAwait(false);
-        }
-
         public async Task<byte[]> PointerPeek(int size, IEnumerable<long> jumps, CancellationToken token)
         {
             return await ReadBytesFromCmdAsync(SwitchCommand.PointerPeek(jumps, size), size, token).ConfigureAwait(false);
@@ -385,13 +365,6 @@ namespace SysBot.Base
         public async Task<ulong> PointerAll(IEnumerable<long> jumps, CancellationToken token)
         {
             var offsetBytes = await ReadBytesFromCmdAsync(SwitchCommand.PointerAll(jumps), sizeof(ulong), token).ConfigureAwait(false);
-            Array.Reverse(offsetBytes, 0, 8);
-            return BitConverter.ToUInt64(offsetBytes, 0);
-        }
-
-        public async Task<ulong> PointerRelative(IEnumerable<long> jumps, CancellationToken token)
-        {
-            var offsetBytes = await ReadBytesFromCmdAsync(SwitchCommand.PointerRelative(jumps), sizeof(ulong), token).ConfigureAwait(false);
             Array.Reverse(offsetBytes, 0, 8);
             return BitConverter.ToUInt64(offsetBytes, 0);
         }

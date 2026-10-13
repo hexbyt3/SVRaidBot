@@ -2,7 +2,6 @@
 using LibUsbDotNet.Main;
 using System;
 using System.IO;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 
@@ -124,12 +123,6 @@ namespace SysBot.Base
                 return SendInternal(buffer);
         }
 
-        public int Read(byte[] buffer)
-        {
-            lock (_sync)
-                return ReadInternal(buffer);
-        }
-
         // One command and its reply at a time: two callers that both send before
         // either reads would each take the other's reply.
         protected byte[] Exchange(byte[] command)
@@ -151,8 +144,6 @@ namespace SysBot.Base
         }
 
         protected byte[] Read(ulong offset, int length, Func<ulong, int, byte[]> method) => Exchange(method(offset, length));
-
-        protected byte[] ReadMulti(IReadOnlyDictionary<ulong, int> offsetSizes, Func<IReadOnlyDictionary<ulong, int>, byte[]> method) => Exchange(method(offsetSizes));
 
         private int ReadReplySize()
         {
@@ -212,17 +203,6 @@ namespace SysBot.Base
                 SendInternal(cmd);
                 Thread.Sleep(1);
             }
-        }
-
-        private int ReadInternal(byte[] buffer)
-        {
-            byte[] sizeOfReturn = new byte[4];
-            if (reader == null)
-                throw new Exception("USB device not found or not connected.");
-
-            reader.Read(sizeOfReturn, 5000, out _);
-            reader.Read(buffer, 5000, out var lenVal);
-            return lenVal;
         }
 
         private int SendInternal(byte[] buffer)

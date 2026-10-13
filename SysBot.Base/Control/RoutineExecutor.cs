@@ -12,7 +12,7 @@ namespace SysBot.Base
         public readonly IConsoleConnectionAsync Connection;
         public readonly T Config;
 
-        protected RoutineExecutor(IConsoleBotManaged<IConsoleConnection, IConsoleConnectionAsync> cfg)
+        protected RoutineExecutor(IConsoleBotManaged<IConsoleConnectionAsync> cfg)
         {
             Config = (T)cfg;
             Connection = cfg.CreateAsynchronous();

@@ -53,12 +53,5 @@ namespace SysBot.Base
             USB => new SwitchUSBAsync(Port),
             _ => throw new ArgumentOutOfRangeException(nameof(SwitchProtocol), Protocol, null),
         };
-
-        public ISwitchConnectionSync CreateSync() => Protocol switch
-        {
-            WiFi => new SwitchSocketSync(this),
-            USB => new SwitchUSBSync(Port),
-            _ => throw new ArgumentOutOfRangeException(nameof(SwitchProtocol)),
-        };
     }
 }

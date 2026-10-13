@@ -1,5 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 
 namespace SysBot.Base
@@ -11,12 +10,7 @@ namespace SysBot.Base
         public bool IsRunning => Bots.Any(z => z.IsRunning);
         public bool RunOnce { get; private set; }
 
-        public virtual void Add(RoutineExecutor<T> bot)
-        {
-            if (Bots.Any(z => z.Bot.Connection.Equals(bot.Connection)))
-                throw new ArgumentException($"{nameof(bot.Connection)} has already been added.");
-            Bots.Add(new BotSource<T>(bot));
-        }
+        public virtual void Add(RoutineExecutor<T> bot) => Bots.Add(new BotSource<T>(bot));
 
         public virtual bool Remove(IConsoleBotConfig cfg, bool callStop)
         {

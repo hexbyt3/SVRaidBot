@@ -19,20 +19,8 @@ namespace SysBot.Pokemon.SV
     public abstract class PokeRoutineExecutor9SV(PokeBotState cfg) : PokeRoutineExecutor<PK9>(cfg)
     {
         protected PokeDataOffsetsSV Offsets { get; } = new();
-        public ulong returnOfs = 0;
 
         public ulong BaseBlockKeyPointer;
-
-        public override async Task<PK9> ReadPokemon(ulong offset, CancellationToken token)
-        {
-            return await ReadPokemon(offset, BoxFormatSlotSize, token).ConfigureAwait(false);
-        }
-
-        public override async Task<PK9> ReadPokemon(ulong offset, int size, CancellationToken token)
-        {
-            byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(offset, size, token).ConfigureAwait(false);
-            return new PK9(data);
-        }
 
         public async Task SetCurrentBox(byte box, CancellationToken token)
         {
@@ -713,46 +701,6 @@ namespace SysBot.Pokemon.SV
             return ReadInt32LittleEndian(header.AsSpan()[1..]);
         }
 
-        public async Task<bool> WriteEncryptedBlockSByte(DataBlock block, sbyte valueToExpect, sbyte valueToInject, CancellationToken token)
-        {
-            Log("Starting WriteEncryptedBlockSByte method.");
-
-
-            ulong address;
-            try
-            {
-                address = await GetBlockAddress(block, token).ConfigureAwait(false);
-                Log($"Block address obtained: {address}");
-            }
-            catch (Exception ex)
-            {
-                Log($"Exception in getting block address: {ex.Message}");
-                return false;
-            }
-
-            byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(address, 5, token).ConfigureAwait(false);
-            header = BlockUtil.DecryptBlock(block.Key, header);
-            Log("Header decrypted.");
-
-            // Directly inject new value without checking current RAM value
-            header[1] = (byte)valueToInject; // Convert sbyte to byte for writing
-            header = BlockUtil.EncryptBlock(block.Key, header);
-            Log("Header encrypted with new value.");
-
-            try
-            {
-                await SwitchConnection.WriteBytesAbsoluteAsync(header, address, token).ConfigureAwait(false);
-                Log("Write operation successful.");
-            }
-            catch (Exception ex)
-            {
-                Log($"Exception in write operation: {ex.Message}");
-                return false;
-            }
-
-            return true;
-        }
-
         public async Task<bool> WriteEncryptedBlockByte(DataBlock block, byte valueToExpect, byte valueToInject, CancellationToken token)
         {
             //Always read and decrypt first to validate address and data
@@ -886,7 +834,7 @@ namespace SysBot.Pokemon.SV
             }
             addr = BitConverter.ToUInt64(await SwitchConnection.ReadBytesAbsoluteAsync(addr + 8, 0x8, token).ConfigureAwait(false), 0);
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(addr, 5, token).ConfigureAwait(false);
-            header = DecryptBlock(block.Key, header);
+            header = BlockUtil.DecryptBlock(block.Key, header);
             return (sbyte)header[1];
         }
 
@@ -910,42 +858,28 @@ namespace SysBot.Pokemon.SV
         public Task<ulong> SearchSaveKey(ulong baseBlock, uint key, CancellationToken token)
             => FindKeyEntryCached(baseBlock + 8, key, token);
 
-        private static byte[] DecryptBlock(uint key, byte[] block)
-        {
-            SCXorShift32 rng = new(key);
-            for (int i = 0; i < block.Length; i++)
-            {
-                block[i] = (byte)(block[i] ^ rng.Next());
-            }
-
-            return block;
-        }
-
-        public Task<ulong> SearchSaveKeyRaid(ulong BaseBlockKeyPointer, uint key, CancellationToken token)
-            => FindKeyEntryCached(BaseBlockKeyPointer + 8, key, token);
-
         public async Task<byte[]> ReadSaveBlockRaid(ulong BaseBlockKeyPointer, uint key, int size, CancellationToken token)
         {
-            ulong block_ofs = await SearchSaveKeyRaid(BaseBlockKeyPointer, key, token).ConfigureAwait(false);
+            ulong block_ofs = await SearchSaveKey(BaseBlockKeyPointer, key, token).ConfigureAwait(false);
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(block_ofs + 8, 0x8, token).ConfigureAwait(false);
             block_ofs = BitConverter.ToUInt64(data, 0);
 
             byte[] block = await SwitchConnection.ReadBytesAbsoluteAsync(block_ofs, size, token).ConfigureAwait(false);
-            return DecryptBlock(key, block);
+            return BlockUtil.DecryptBlock(key, block);
         }
 
         public async Task<byte[]> ReadSaveBlockObject(ulong BaseBlockKeyPointer, uint key, CancellationToken token)
         {
-            ulong header_ofs = await SearchSaveKeyRaid(BaseBlockKeyPointer, key, token).ConfigureAwait(false);
+            ulong header_ofs = await SearchSaveKey(BaseBlockKeyPointer, key, token).ConfigureAwait(false);
             byte[] data = await SwitchConnection.ReadBytesAbsoluteAsync(header_ofs + 8, 8, token).ConfigureAwait(false);
             header_ofs = BitConverter.ToUInt64(data);
 
             byte[] header = await SwitchConnection.ReadBytesAbsoluteAsync(header_ofs, 5, token).ConfigureAwait(false);
-            header = DecryptBlock(key, header);
+            header = BlockUtil.DecryptBlock(key, header);
 
             uint size = BitConverter.ToUInt32(header.AsSpan()[1..]);
             byte[] obj = await SwitchConnection.ReadBytesAbsoluteAsync(header_ofs, (int)size + 5, token).ConfigureAwait(false);
-            return DecryptBlock(key, obj)[5..];
+            return BlockUtil.DecryptBlock(key, obj)[5..];
         }
 
         public async Task<byte[]> ReadBlockDefault(ulong BaseBlockKeyPointer, uint key, string? cache, bool force, CancellationToken token)
