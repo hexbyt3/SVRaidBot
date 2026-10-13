@@ -81,25 +81,11 @@ public static class UpdateManager
         {
             if (processId == Environment.ProcessId)
             {
-                var flpBotsField = mainForm.GetType().GetField("FLP_Bots",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-                if (flpBotsField?.GetValue(mainForm) is FlowLayoutPanel flpBots)
-                {
-                    var controllers = flpBots.Controls.OfType<BotController>().ToList();
-                    foreach (var controller in controllers)
-                    {
-                        var currentState = controller.ReadBotState();
-                        if (currentState != "IDLE" && currentState != "STOPPED")
-                        {
-                            controller.SendCommand(BotControlCommand.Idle, false);
-                        }
-                    }
-                }
+                mainForm.RunOnUiThread(() => mainForm.SendAll(BotControlCommand.Idle));
             }
             else
             {
-                var idleResponse = BotServer.QueryRemote(port, "IDLEALL");
+                var idleResponse = InstanceDiscovery.Query(port, "IDLEALL");
                 if (idleResponse.StartsWith("ERROR"))
                 {
                     LogUtil.LogError($"Failed to send idle command to port {port}", "UpdateManager");
@@ -155,7 +141,7 @@ public static class UpdateManager
                 else
                 {
                     LogUtil.LogInfo($"Triggering update for instance on port {port}...", "UpdateManager");
-                    var updateResponse = BotServer.QueryRemote(port, "UPDATE");
+                    var updateResponse = InstanceDiscovery.Query(port, "UPDATE");
                     if (!updateResponse.StartsWith("ERROR"))
                     {
                         instanceResult.UpdateStarted = true;
@@ -185,65 +171,13 @@ public static class UpdateManager
 
     private static List<(int ProcessId, int Port, string Version)> GetAllInstances(int currentPort)
     {
-        var instances = new List<(int, int, string)>
+        var instances = new List<(int, int, string)> { (Environment.ProcessId, currentPort, SVRaidBot.Version) };
+        foreach (var copy in InstanceDiscovery.FindOthers())
         {
-            (Environment.ProcessId, currentPort, SVRaidBot.Version)
-        };
-
-        try
-        {
-            var processes = Process.GetProcessesByName("SVRaidBot")
-                .Where(p => p.Id != Environment.ProcessId);
-
-            foreach (var process in processes)
-            {
-                try
-                {
-                    var exePath = process.MainModule?.FileName;
-                    if (string.IsNullOrEmpty(exePath))
-                        continue;
-
-                    var portFile = Path.Combine(Path.GetDirectoryName(exePath)!, $"SVRaidBot_{process.Id}.port");
-                    if (!File.Exists(portFile))
-                        continue;
-
-                    var portText = File.ReadAllText(portFile).Trim();
-                    if (!int.TryParse(portText, out var port))
-                        continue;
-
-                    if (!IsPortOpen(port))
-                        continue;
-
-                    var versionResponse = BotServer.QueryRemote(port, "VERSION");
-                    var version = versionResponse.StartsWith("ERROR") ? "Unknown" : versionResponse.Trim();
-
-                    instances.Add((process.Id, port, version));
-                }
-                catch { }
-            }
+            var version = InstanceDiscovery.Query(copy.Port, "VERSION");
+            if (!version.StartsWith("ERROR"))
+                instances.Add((copy.ProcessId, copy.Port, version.Trim()));
         }
-        catch { }
-
         return instances;
-    }
-
-    private static bool IsPortOpen(int port)
-    {
-        try
-        {
-            using var client = new System.Net.Sockets.TcpClient();
-            var result = client.BeginConnect("127.0.0.1", port, null, null);
-            var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(1));
-            if (success)
-            {
-                client.EndConnect(result);
-                return true;
-            }
-            return false;
-        }
-        catch
-        {
-            return false;
-        }
     }
 }

@@ -354,8 +354,6 @@ namespace SysBot.Pokemon.WinForms
             }
         }
 
-        public string ReadBotState() => GetBot() is { } bot ? WebApi.BotStatus.Read(bot) : "ERROR";
-
         public BotSource<PokeBotState>? GetBot()
         {
             try
