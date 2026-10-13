@@ -52,6 +52,20 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             }
         }
 
+        // Without Manage Messages, or in a DM, or after someone else deleted it first.
+        private static async Task TryDeleteAsync(IMessage message)
+        {
+            try
+            {
+                await message.DeleteAsync().ConfigureAwait(false);
+            }
+            catch (global::Discord.Net.HttpException)
+            {
+            }
+        }
+
+        private Task TryDeleteCommandMessage() => TryDeleteAsync(Context.Message);
+
         [Command("raidinfo")]
         [Alias("ri", "rv")]
         [Summary("Displays basic Raid Info of the provided seed.")]
@@ -136,19 +150,19 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
 
                 SysCord<T>.ReactionService.AddReactionHandler(message.Id, async (reaction) =>
                 {
-                    if (reaction.UserId == Context.User.Id && reaction.Emote.Name == checkmarkEmoji.Name)
-                    {
-                        await AddNewRaidParamNext(seedValue, level, storyProgressLevel, speciesName);
-
-                        SysCord<T>.ReactionService.RemoveReactionHandler(reaction.MessageId);
-                    }
+                    if (reaction.UserId != Context.User.Id || reaction.Emote.Name != checkmarkEmoji.Name)
+                        return;
+                    // A double tap delivers two reactions; only the first one queues the raid.
+                    if (!SysCord<T>.ReactionService.RemoveReactionHandler(reaction.MessageId))
+                        return;
+                    await AddNewRaidParamNext(seedValue, level, storyProgressLevel, speciesName);
                 });
                 _ = Task.Run(async () =>
                 {
-                    await Task.Delay(TimeSpan.FromMinutes(1));
+                    await Task.Delay(TimeSpan.FromMinutes(1)).ConfigureAwait(false);
                     SysCord<T>.ReactionService.RemoveReactionHandler(message.Id);
-                    await message.DeleteAsync();
-                    await instructionMessage.DeleteAsync();
+                    await TryDeleteAsync(message).ConfigureAwait(false);
+                    await TryDeleteAsync(instructionMessage).ConfigureAwait(false);
                 });
             }
             catch (Exception ex)

@@ -2,17 +2,23 @@
 using Discord.Commands;
 using Discord.WebSocket;
 using PKHeX.Core;
+using SysBot.Base;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SysBot.Pokemon.Discord
 {
     public class ExtraCommandUtil<T> where T : PKM, new()
     {
-        private static readonly Dictionary<ulong, ReactMessageContents> ReactMessageDict = new();
-        private static bool DictWipeRunning = false;
+        private static readonly ConcurrentDictionary<ulong, ReactMessageContents> ReactMessageDict = new();
+        private static int DictWipeRunning;
+
+        private static readonly IEmote[] PageReactions = [new Emoji("⬅️"), new Emoji("➡️")];
+        private static readonly IEmote[] SortReactions = [new Emoji("⬆️"), new Emoji("⬇️")];
 
         private class ReactMessageContents
         {
@@ -20,12 +26,13 @@ namespace SysBot.Pokemon.Discord
             public EmbedBuilder Embed { get; set; } = new();
             public ulong MessageID { get; set; }
             public DateTime EntryTime { get; set; }
+            public readonly SemaphoreSlim Gate = new(1, 1);
         }
 
         public async Task ListUtil(SocketCommandContext ctx, string nameMsg, string entry)
         {
             List<string> pageContent = ListUtilPrep(entry);
-            bool canReact = ctx.Guild.CurrentUser.GetPermissions(ctx.Channel as IGuildChannel).AddReactions;
+            bool canReact = ctx.Guild is not null && ctx.Guild.CurrentUser.GetPermissions(ctx.Channel as IGuildChannel).AddReactions;
             var embed = new EmbedBuilder { Color = GetBorderColor(false) }.AddField(x =>
             {
                 x.Name = nameMsg;
@@ -49,110 +56,91 @@ namespace SysBot.Pokemon.Discord
             var msg = await ctx.Message.Channel.SendMessageAsync(embed: embed.Build()).ConfigureAwait(false);
             if (pageContent.Count > 1 && canReact)
             {
-                bool exists = ReactMessageDict.TryGetValue(ctx.User.Id, out _);
-                if (exists)
-                    ReactMessageDict[ctx.User.Id] = new() { Embed = embed, Pages = pageContent, MessageID = msg.Id, EntryTime = DateTime.Now };
-                else ReactMessageDict.Add(ctx.User.Id, new() { Embed = embed, Pages = pageContent, MessageID = msg.Id, EntryTime = DateTime.Now });
+                ReactMessageDict[ctx.User.Id] = new() { Embed = embed, Pages = pageContent, MessageID = msg.Id, EntryTime = DateTime.Now };
 
-                IEmote[] reactions = { new Emoji("⬅️"), new Emoji("➡️"), new Emoji("⬆️"), new Emoji("⬇️") };
-                _ = Task.Run(async () => await msg.AddReactionsAsync(reactions).ConfigureAwait(false));
-                if (!DictWipeRunning)
+                // Only comma lists hold one item per entry; sorting the lines of a multi-line list would scramble it.
+                IEmote[] reactions = IsCommaList(entry) ? [.. PageReactions, .. SortReactions] : PageReactions;
+                _ = Task.Run(async () =>
+                {
+                    try { await msg.AddReactionsAsync(reactions).ConfigureAwait(false); }
+                    catch (Exception ex) { LogUtil.LogSafe(ex, nameof(ListUtil)); }
+                });
+                if (Interlocked.CompareExchange(ref DictWipeRunning, 1, 0) == 0)
                     _ = Task.Run(DictWipeMonitor);
             }
         }
 
         private static async Task DictWipeMonitor()
         {
-            DictWipeRunning = true;
             while (true)
             {
                 await Task.Delay(10_000).ConfigureAwait(false);
-                for (int i = 0; i < ReactMessageDict.Count; i++)
+                foreach (var entry in ReactMessageDict)
                 {
-                    var entry = ReactMessageDict.ElementAt(i);
-                    var delta = (DateTime.Now - entry.Value.EntryTime).TotalSeconds;
-                    if (delta > 90.0)
-                        ReactMessageDict.Remove(entry.Key);
+                    if ((DateTime.Now - entry.Value.EntryTime).TotalSeconds > 90.0)
+                        ReactMessageDict.TryRemove(entry);
                 }
             }
         }
 
         public static Task HandleReactionAsync(Cacheable<IUserMessage, ulong> cachedMsg, Cacheable<IMessageChannel, ulong> ch, SocketReaction reaction)
         {
+            if (!ReactMessageDict.TryGetValue(reaction.UserId, out var contents) || contents.MessageID != reaction.MessageId)
+                return Task.CompletedTask;
+            if (!PageReactions.Contains(reaction.Emote) && !SortReactions.Contains(reaction.Emote))
+                return Task.CompletedTask;
+
             _ = Task.Run(async () =>
             {
-                IEmote[] reactions = { new Emoji("⬅️"), new Emoji("➡️"), new Emoji("⬆️"), new Emoji("⬇️") };
-                if (!reactions.Contains(reaction.Emote))
-                    return;
-
-                if (!ch.HasValue || ch.Value is IDMChannel)
-                    return;
-
-                IUserMessage msg;
-                if (!cachedMsg.HasValue)
-                    msg = await cachedMsg.GetOrDownloadAsync().ConfigureAwait(false);
-                else msg = cachedMsg.Value;
-
-                bool process = msg.Embeds.First().Fields[0].Name.Contains("list");
-                if (!process || !reaction.User.IsSpecified)
-                    return;
-
-                var user = reaction.User.Value;
-                if (user.IsBot || !ReactMessageDict.ContainsKey(user.Id))
-                    return;
-
-                bool invoker = msg.Embeds.First().Fields[0].Name == ReactMessageDict[user.Id].Embed.Fields[0].Name;
-                if (!invoker)
-                    return;
-
-                var contents = ReactMessageDict[user.Id];
-                bool oldMessage = msg.Id != contents.MessageID;
-                if (oldMessage)
-                    return;
-
-                int page = contents.Pages.IndexOf((string)contents.Embed.Fields[0].Value);
-                if (page == -1)
-                    return;
-
-                if (reaction.Emote.Name == reactions[0].Name || reaction.Emote.Name == reactions[1].Name)
+                await contents.Gate.WaitAsync().ConfigureAwait(false);
+                try
                 {
-                    if (reaction.Emote.Name == reactions[0].Name)
-                    {
-                        if (page == 0)
-                            page = contents.Pages.Count - 1;
-                        else page--;
-                    }
-                    else
-                    {
-                        if (page + 1 == contents.Pages.Count)
-                            page = 0;
-                        else page++;
-                    }
-
-                    contents.Embed.Fields[0].Value = contents.Pages[page];
-                    contents.Embed.Footer.Text = $"Page {page + 1} of {contents.Pages.Count}";
-                    await msg.RemoveReactionAsync(reactions[reaction.Emote.Name == reactions[0].Name ? 0 : 1], user).ConfigureAwait(false);
-                    await msg.ModifyAsync(msg => msg.Embed = contents.Embed.Build()).ConfigureAwait(false);
+                    var msg = await cachedMsg.GetOrDownloadAsync().ConfigureAwait(false);
+                    if (msg is null)
+                        return;
+                    await TurnPageAsync(msg, contents, reaction).ConfigureAwait(false);
                 }
-                else if (reaction.Emote.Name == reactions[2].Name || reaction.Emote.Name == reactions[3].Name)
+                catch (Exception ex)
                 {
-                    List<string> tempList = new();
-                    foreach (var p in contents.Pages)
-                    {
-                        var split = p.Replace(", ", ",").Split(',');
-                        tempList.AddRange(split);
-                    }
-
-                    var tempEntry = string.Join(", ", reaction.Emote.Name == reactions[2].Name ? tempList.OrderBy(x => x.Split(' ')[1]) : tempList.OrderByDescending(x => x.Split(' ')[1]));
-                    contents.Pages = ListUtilPrep(tempEntry);
-                    contents.Embed.Fields[0].Value = contents.Pages[page];
-                    contents.Embed.Footer.Text = $"Page {page + 1} of {contents.Pages.Count}";
-                    await msg.RemoveReactionAsync(reactions[reaction.Emote.Name == reactions[2].Name ? 2 : 3], user).ConfigureAwait(false);
-                    await msg.ModifyAsync(msg => msg.Embed = contents.Embed.Build()).ConfigureAwait(false);
+                    LogUtil.LogSafe(ex, nameof(HandleReactionAsync));
+                }
+                finally
+                {
+                    contents.Gate.Release();
                 }
             });
             return Task.CompletedTask;
         }
+
+        private static async Task TurnPageAsync(IUserMessage msg, ReactMessageContents contents, SocketReaction reaction)
+        {
+            int page = contents.Pages.IndexOf((string)contents.Embed.Fields[0].Value);
+            if (page == -1)
+                return;
+
+            var name = reaction.Emote.Name;
+            if (name == PageReactions[0].Name)
+                page = page == 0 ? contents.Pages.Count - 1 : page - 1;
+            else if (name == PageReactions[1].Name)
+                page = page + 1 == contents.Pages.Count ? 0 : page + 1;
+            else
+            {
+                var items = contents.Pages.SelectMany(p => p.Split(',')).Select(x => x.Trim()).Where(x => x.Length > 0);
+                var sorted = name == SortReactions[0].Name ? items.OrderBy(SortKey) : items.OrderByDescending(SortKey);
+                contents.Pages = ListUtilPrep(string.Join(", ", sorted));
+                page = Math.Clamp(page, 0, contents.Pages.Count - 1);
+            }
+
+            contents.Embed.Fields[0].Value = contents.Pages[page];
+            contents.Embed.Footer.Text = $"Page {page + 1} of {contents.Pages.Count}";
+            await msg.RemoveReactionAsync(reaction.Emote, reaction.UserId).ConfigureAwait(false);
+            await msg.ModifyAsync(m => m.Embed = contents.Embed.Build()).ConfigureAwait(false);
+        }
+
+        // Entries look like "1. Name"; sort on what follows the first space, or the whole entry when there is none.
+        private static string SortKey(string item) => item.Split(' ', 2) is [_, var rest] ? rest : item;
+
+        private static bool IsCommaList(string entry) => entry.Contains(',');
 
         private static List<string> SpliceAtWord(string entry, int start, int length)
         {

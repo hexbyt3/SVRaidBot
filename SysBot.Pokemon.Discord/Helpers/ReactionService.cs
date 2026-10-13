@@ -1,23 +1,19 @@
-﻿using Discord;
+using Discord;
 using Discord.WebSocket;
+using SysBot.Base;
 using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Threading.Tasks;
 
 namespace SysBot.Pokemon.Discord.Helpers
 {
     public class ReactionService
     {
-        private readonly DiscordSocketClient _client;
-        private readonly Dictionary<ulong, Func<SocketReaction, Task>> _reactionActions;
+        private readonly ConcurrentDictionary<ulong, Func<SocketReaction, Task>> _reactionActions = new();
 
         public ReactionService(DiscordSocketClient client)
         {
-            _client = client;
-            _reactionActions = new Dictionary<ulong, Func<SocketReaction, Task>>();
-
-            // Subscribe to the reaction added event
-            _client.ReactionAdded += OnReactionAddedAsync;
+            client.ReactionAdded += OnReactionAddedAsync;
         }
 
         public void AddReactionHandler(ulong messageId, Func<SocketReaction, Task> handler)
@@ -25,17 +21,27 @@ namespace SysBot.Pokemon.Discord.Helpers
             _reactionActions[messageId] = handler;
         }
 
-        public void RemoveReactionHandler(ulong messageId)
-        {
-            _reactionActions.Remove(messageId);
-        }
+        /// <summary>Returns false when the handler was already gone, so only one caller acts on it.</summary>
+        public bool RemoveReactionHandler(ulong messageId) => _reactionActions.TryRemove(messageId, out _);
 
-        private async Task OnReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage, Cacheable<IMessageChannel, ulong> cachedChannel, SocketReaction reaction)
+        // Handlers send messages; running them on the gateway thread would stall every other event.
+        private Task OnReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage, Cacheable<IMessageChannel, ulong> cachedChannel, SocketReaction reaction)
         {
-            if (_reactionActions.TryGetValue(reaction.MessageId, out var handler))
+            if (!_reactionActions.TryGetValue(reaction.MessageId, out var handler))
+                return Task.CompletedTask;
+
+            _ = Task.Run(async () =>
             {
-                await handler(reaction);
-            }
+                try
+                {
+                    await handler(reaction).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    LogUtil.LogSafe(ex, nameof(ReactionService));
+                }
+            });
+            return Task.CompletedTask;
         }
     }
 }

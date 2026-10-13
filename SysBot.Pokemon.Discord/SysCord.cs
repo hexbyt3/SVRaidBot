@@ -38,6 +38,7 @@ namespace SysBot.Pokemon.Discord
         private const int MaxReconnectDelay = 60000; // 1 minute
         private int _reconnectAttempts;
         private volatile bool _stoppedForGood;
+        private readonly RaidCodeCooldown _codeCooldown = new();
         private readonly CommandService _commands;
         private readonly IServiceProvider _services;
 
@@ -238,24 +239,36 @@ namespace SysBot.Pokemon.Discord
             _client.ReactionAdded += ExtraCommandUtil<T>.HandleReactionAsync;
         }
 
-        private async Task HandleReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage,
+        private Task HandleReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage,
             Cacheable<IMessageChannel, ulong> originChannel, SocketReaction reaction)
         {
-            // Ignore reactions from bots (including our own)
-            if (reaction.User.Value.IsBot)
-                return;
-            if (reaction.Emote.Name != "✅")
-                return;
+            if (reaction.UserId == _client.CurrentUser.Id || reaction.Emote.Name != "✅")
+                return Task.CompletedTask;
             if (!SharedRaidCodeHandler.IsActiveRaidMessage(reaction.MessageId))
-                return;
+                return Task.CompletedTask;
+            if (!_codeCooldown.TryStart(reaction.MessageId, reaction.UserId, DateTime.UtcNow))
+                return Task.CompletedTask;
 
+            _ = Task.Run(() => SendRaidCodeAsync(originChannel, reaction));
+            return Task.CompletedTask;
+        }
+
+        private async Task SendRaidCodeAsync(Cacheable<IMessageChannel, ulong> originChannel, SocketReaction reaction)
+        {
             var code = SharedRaidCodeHandler.GetRaidCodeForMessage(reaction.MessageId);
             if (string.IsNullOrEmpty(code))
                 return;
             var raidInfoDict = SharedRaidCodeHandler.GetRaidInfoDict(reaction.MessageId);
             try
             {
-                var dmChannel = await reaction.User.Value.CreateDMChannelAsync();
+                // Reactions from members outside the cache arrive without a user object.
+                var user = reaction.User.IsSpecified
+                    ? reaction.User.Value
+                    : await ((IDiscordClient)_client).GetUserAsync(reaction.UserId, CacheMode.AllowDownload).ConfigureAwait(false);
+                if (user is null || user.IsBot)
+                    return;
+
+                var dmChannel = await user.CreateDMChannelAsync().ConfigureAwait(false);
                 bool isShiny = raidInfoDict != null &&
                               raidInfoDict.TryGetValue("IsShiny", out var shinyStr) &&
                               bool.TryParse(shinyStr, out var shinyBool) &&
