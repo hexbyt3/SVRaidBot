@@ -31,8 +31,19 @@ namespace SysBot.Pokemon
         public string HelloResponse { get; set; } = "Hello, {0}!  I'm online!";
 
         // Whitelists
-        [Category(Roles), Description("Users with this role are allowed to enter the Raid queue.")]
-        public RemoteControlAccessList RoleRaidRequest { get; set; } = new() { AllowIfEmpty = false };
+        private RemoteControlAccessList _roleRaidRequest = new();
+
+        [Category(Roles), Description("Users with these roles are allowed to enter the Raid queue. Leave it empty to let everyone request raids.")]
+        public RemoteControlAccessList RoleRaidRequest
+        {
+            get => _roleRaidRequest;
+            set
+            {
+                _roleRaidRequest = value;
+                // Empty means everyone; older configs saved this as false while nothing checked it.
+                value.AllowIfEmpty = true;
+            }
+        }
 
         [Browsable(false)]
         [Category(Roles), Description("Users with this role are allowed to remotely control the console (if running as Remote Control Bot.")]

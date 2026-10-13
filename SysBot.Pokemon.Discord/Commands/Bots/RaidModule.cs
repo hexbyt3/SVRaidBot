@@ -1,18 +1,15 @@
-﻿using Discord;
+using Discord;
 using Discord.Commands;
 using Discord.WebSocket;
-using Newtonsoft.Json.Linq;
 using PKHeX.Core;
 using SysBot.Base;
 using SysBot.Pokemon.Discord.Helpers;
-using SysBot.Pokemon.SV.BotRaid.Helpers;
+using SysBot.Pokemon.SV.BotRaid;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using static SysBot.Pokemon.RotatingRaidSettingsSV;
@@ -20,8 +17,8 @@ using static SysBot.Pokemon.SV.BotRaid.RotatingRaidBotSV;
 
 namespace SysBot.Pokemon.Discord.Commands.Bots
 {
-    [Summary("Generates and queues various silly trade additions")]
-    public partial class RaidModule<T> : ModuleBase<SocketCommandContext> where T : PKM, new()
+    [Summary("Requests, lists and manages raids.")]
+    public class RaidModule<T> : ModuleBase<SocketCommandContext> where T : PKM, new()
     {
         private readonly PokeRaidHub<T> Hub = SysCord<T>.Runner.Hub;
 
@@ -29,7 +26,14 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
 
         private const string WebRequestLocked = "That is a GenPKM member's request. It finishes or times out on its own, and the member is kept up to date on the site.";
 
+        // Same title RotatingRaidBotSV gives the raids it rolls itself.
+        private const string MysteryRaidTitle = "Mystery Shiny Raid";
+        private const int MinutesPerRaid = 6;
+        private const int MaxInvitedUsers = 3;
+
         private bool IsHosting => Hub.Bots.CountWhere(b => b.Config.CurrentRoutineType != PokeRoutineType.Idle) > 0;
+
+        private sealed record RaidBuild(PK9 Pokemon, Embed Embed, TeraCrystalType Crystal, int GroupId, bool IsEvent);
 
         /// <summary>
         /// Takes a raid out of the list. While a bot is hosting, the raid is only
@@ -66,6 +70,95 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
 
         private Task TryDeleteCommandMessage() => TryDeleteAsync(Context.Message);
 
+        private static TeraRaidMapParent CurrentMap() => IsBlueberry ? TeraRaidMapParent.Blueberry : (IsKitakami ? TeraRaidMapParent.Kitakami : TeraRaidMapParent.Paldea);
+
+        /// <summary>
+        /// Checks a seed request and rolls the raid it describes. Replies with the problem and returns null when it can't be raided.
+        /// </summary>
+        private async Task<RaidBuild?> BuildRaidAsync(string seed, int level, int storyProgressLevel, string? speciesName, int queuePosition, bool requireSpeciesFor7)
+        {
+            if (!WebRaidRules.IsValidSeed(seed))
+            {
+                await ReplyAsync("Invalid seed format. Please enter a seed of exactly 8 hexadecimal digits.").ConfigureAwait(false);
+                return null;
+            }
+            if (RaidRequestRules.CheckLevel(level, storyProgressLevel) is { } problem)
+            {
+                await ReplyAsync(problem).ConfigureAwait(false);
+                return null;
+            }
+
+            // The raid bot swaps in a new map when events change; read it once.
+            var events = SpeciesToGroupIDMap;
+            bool isEvent = !string.IsNullOrEmpty(speciesName);
+            if (requireSpeciesFor7 && level == 7 && storyProgressLevel == 6 && !isEvent)
+            {
+                await ReplyAsync($"For 7★ raids, please specify the species name. Available species: {string.Join(", ", events.Keys)}").ConfigureAwait(false);
+                return null;
+            }
+
+            var map = CurrentMap();
+            if (isEvent && map != TeraRaidMapParent.Paldea)
+            {
+                await ReplyAsync("Events can only be run in the Paldea map.").ConfigureAwait(false);
+                return null;
+            }
+
+            int groupId = -1;
+            var crystal = WebRaidRules.CrystalFor(level, isEvent);
+            if (isEvent)
+            {
+                if (!events.TryGetValue(speciesName!, out var groups) || groups.Count == 0)
+                {
+                    await ReplyAsync("Species name not recognized or not associated with an active event. Please check the name and try again.").ConfigureAwait(false);
+                    return null;
+                }
+                groupId = groups[0].GroupID;
+
+                // Might events are 7★ and Distribution events are 1-5★; the event decides, not the level typed.
+                if (EventCrystalFor(speciesName!, level) is not { } eventCrystal)
+                {
+                    string kind = EventCrystalFor(speciesName!, 7) is not null ? "a 7★ Might raid" : "a 1-5★ event raid";
+                    await ReplyAsync($"The {speciesName} event is {kind}, not {level}★. Please request it at that difficulty.").ConfigureAwait(false);
+                    return null;
+                }
+                crystal = eventCrystal;
+            }
+
+            var toggles = Hub.Config.RotatingRaidSV.EmbedToggles;
+            try
+            {
+                var (pk, embed) = RaidInfoCommand(seed, (int)crystal, map, storyProgressLevel, groupId, toggles.RewardsToShow,
+                    toggles.MoveTypeEmojis, toggles.CustomTypeEmojis, queuePosition, isEvent, (int)toggles.EmbedLanguage);
+                return new RaidBuild(pk, embed, crystal, groupId, isEvent);
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogSafe(ex, nameof(RaidModule<T>));
+                await ReplyAsync($"I couldn't build a raid from that seed: {ex.Message}. Check the seed, difficulty and story progress, then try again.").ConfigureAwait(false);
+                return null;
+            }
+        }
+
+        private static RotatingRaidParameters NewRaid(RaidBuild raid, string seed, int level, int storyProgressLevel)
+        {
+            var descriptionPath = Path.Combine("raidfilessv", "bodyparam.txt");
+            return new RotatingRaidParameters
+            {
+                CrystalType = raid.Crystal,
+                DifficultyLevel = level,
+                Description = [File.Exists(descriptionPath) ? File.ReadAllText(descriptionPath) : string.Empty],
+                // A Ditto raid copies the party lead, so it gets a harmless one.
+                PartyPK = raid.Pokemon.Species == (ushort)Species.Ditto ? ["Happiny", "Shiny: Yes", "Level: 1"] : [""],
+                Species = (Species)raid.Pokemon.Species,
+                SpeciesForm = raid.Pokemon.Form,
+                StoryProgress = (GameProgressEnum)RaidRequestRules.ToGameProgress(storyProgressLevel),
+                Seed = seed,
+                IsCoded = true,
+                IsShiny = raid.Pokemon.IsShiny,
+            };
+        }
+
         [Command("raidinfo")]
         [Alias("ri", "rv")]
         [Summary("Displays basic Raid Info of the provided seed.")]
@@ -75,101 +168,40 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             int storyProgressLevel = 6,
             string? speciesName = null)
         {
-            if (!SysBot.Pokemon.SV.BotRaid.WebRaidRules.IsValidSeed(seedValue))
-            {
-                await ReplyAsync("Invalid seed format. Please enter a seed of exactly 8 hexadecimal digits.");
+            var raid = await BuildRaidAsync(seedValue, level, storyProgressLevel, speciesName, 0, requireSpeciesFor7: true).ConfigureAwait(false);
+            if (raid is null)
                 return;
-            }
-            if (level == 7 && storyProgressLevel == 6 && string.IsNullOrEmpty(speciesName))
+
+            var instructionMessage = await ReplyAsync("React with ✅ to add the raid to the queue.").ConfigureAwait(false);
+            var message = await ReplyAsync(embed: raid.Embed).ConfigureAwait(false);
+            var checkmarkEmoji = new Emoji("✅");
+            await message.AddReactionAsync(checkmarkEmoji).ConfigureAwait(false);
+
+            SysCord<T>.ReactionService.AddReactionHandler(message.Id, async (reaction) =>
             {
-                var availableSpecies = string.Join(", ", SpeciesToGroupIDMap.Keys);
-                await ReplyAsync($"For 7★ raids, please specify the species name. Available species: {availableSpecies}").ConfigureAwait(false);
-                return;
-            }
-            // Check Compatibility of Difficulty and Story Progress Level
-            var compatible = CheckProgressandLevel(level, storyProgressLevel);
-            if (!compatible)
-            {
-                string requiredProgress = GetRequiredProgress(level);
-                await ReplyAsync($"The selected raid difficulty level ({level}★) is not compatible with your current story progress. " +
-                                 $"To access {level}★ raids, you need to have at least {requiredProgress} in the game's story.").ConfigureAwait(false);
-                return;
-            }
+                if (reaction.UserId != Context.User.Id || reaction.Emote.Name != checkmarkEmoji.Name)
+                    return;
+                // A double tap delivers two reactions; only the first one queues the raid.
+                if (!SysCord<T>.ReactionService.RemoveReactionHandler(reaction.MessageId))
+                    return;
 
-            var settings = Hub.Config.RotatingRaidSV;  // Get RotatingRaidSV settings
-
-            bool isEvent = !string.IsNullOrEmpty(speciesName);
-
-            var selectedMap = IsBlueberry ? TeraRaidMapParent.Blueberry : (IsKitakami ? TeraRaidMapParent.Kitakami : TeraRaidMapParent.Paldea);
-
-            if (isEvent && selectedMap != TeraRaidMapParent.Paldea)
-            {
-                await ReplyAsync("Events can only be run in the Paldea map.");
-                return;
-            }
-
-            int raidDeliveryGroupID = -1;
-            if (!string.IsNullOrEmpty(speciesName) && SpeciesToGroupIDMap.TryGetValue(speciesName, out var groupIDAndIndices))
-            {
-                var firstRaidGroupID = groupIDAndIndices.First().GroupID;
-                raidDeliveryGroupID = firstRaidGroupID;
-            }
-            else if (!string.IsNullOrEmpty(speciesName))
-            {
-                await ReplyAsync("Species name not recognized or not associated with an active event. Please check the name and try again.");
-                return;
-            }
-
-            var crystalType = level switch
-            {
-                >= 1 and <= 5 => isEvent ? (TeraCrystalType)2 : 0,
-                6 => (TeraCrystalType)1,
-                7 => (TeraCrystalType)3,
-                _ => throw new ArgumentException("Invalid difficulty level.")
-            };
-
-            try
-            {
-                var rewardsToShow = settings.EmbedToggles.RewardsToShow;
-                var (_, embed) = RaidInfoCommand(
-                    seedValue,
-                    (int)crystalType,
-                    selectedMap,
-                    storyProgressLevel,
-                    raidDeliveryGroupID,
-                    rewardsToShow,
-                    settings.EmbedToggles.MoveTypeEmojis,
-                    settings.EmbedToggles.CustomTypeEmojis,
-                    0,
-                    isEvent,
-                    (int)settings.EmbedToggles.EmbedLanguage);
-                var instructionMessage = await ReplyAsync("React with ✅ to add the raid to the queue.");
-                var message = await ReplyAsync(embed: embed);
-                var checkmarkEmoji = new Emoji("✅");
-                await message.AddReactionAsync(checkmarkEmoji);
-
-                SysCord<T>.ReactionService.AddReactionHandler(message.Id, async (reaction) =>
+                // The ✅ skips the command pipeline, so the ra role check runs here.
+                var access = RequireRoleAccessAttribute.Check(Context.User, nameof(DiscordManager.RolesRaid));
+                if (!access.IsSuccess)
                 {
-                    if (reaction.UserId != Context.User.Id || reaction.Emote.Name != checkmarkEmoji.Name)
-                        return;
-                    // A double tap delivers two reactions; only the first one queues the raid.
-                    if (!SysCord<T>.ReactionService.RemoveReactionHandler(reaction.MessageId))
-                        return;
-                    await AddNewRaidParamNext(seedValue, level, storyProgressLevel, speciesName);
-                });
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(TimeSpan.FromMinutes(1)).ConfigureAwait(false);
-                    SysCord<T>.ReactionService.RemoveReactionHandler(message.Id);
-                    await TryDeleteAsync(message).ConfigureAwait(false);
-                    await TryDeleteAsync(instructionMessage).ConfigureAwait(false);
-                });
-            }
-            catch (Exception ex)
+                    await ReplyAsync(access.ErrorReason).ConfigureAwait(false);
+                    return;
+                }
+                await AddNewRaidParamNext(seedValue, level, storyProgressLevel, speciesName).ConfigureAwait(false);
+            });
+            _ = Task.Run(async () =>
             {
-                await ReplyAsync(ex.Message);
-            }
-            await Context.Message.DeleteAsync().ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromMinutes(1)).ConfigureAwait(false);
+                SysCord<T>.ReactionService.RemoveReactionHandler(message.Id);
+                await TryDeleteAsync(message).ConfigureAwait(false);
+                await TryDeleteAsync(instructionMessage).ConfigureAwait(false);
+            });
+            await TryDeleteCommandMessage().ConfigureAwait(false);
         }
 
         [Command("banOT")]
@@ -268,17 +300,18 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [Alias("alb")]
         [Summary("Adds a user or role to the bypass list for request limits.")]
         [RequireSudo]
+        [RequireContext(ContextType.Guild)]
         public async Task AddBypassLimitAsync([Remainder] string mention)
         {
             string type;
             string nameToAdd;
             if (MentionUtils.TryParseUser(mention, out ulong idToAdd))
             {
-                var user = Context.Guild.GetUser(idToAdd);
+                // The mentioned user comes with the message even when the member list isn't cached.
+                var user = (IUser?)Context.Guild.GetUser(idToAdd) ?? Context.MentionedUsersExceptBot().FirstOrDefault(u => u.Id == idToAdd);
                 nameToAdd = user?.Username ?? "Unknown User";
                 type = "User";
             }
-            // Check if mention is a role
             else if (MentionUtils.TryParseRole(mention, out idToAdd))
             {
                 var role = Context.Guild.GetRole(idToAdd);
@@ -292,14 +325,9 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             }
 
             if (Hub.Config.RotatingRaidSV.RaidSettings.BypassLimitRequests.TryAdd(idToAdd, nameToAdd))
-            {
-
                 await ReplyAsync($"Added {type} '{nameToAdd}' to bypass list.").ConfigureAwait(false);
-            }
             else
-            {
                 await ReplyAsync($"{type} '{nameToAdd}' is already in the bypass list.").ConfigureAwait(false);
-            }
         }
 
         [Command("repeek")]
@@ -307,21 +335,17 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireOwner]
         public async Task RePeek()
         {
-            string ip = RaidModule<T>.GetBotIPFromJsonConfig(); // Fetch the IP from the config
-            var source = new CancellationTokenSource();
-            var token = source.Token;
-
-            var bot = SysCord<T>.Runner.GetBot(ip);
+            var bot = SysCord<T>.Runner.Bots.FirstOrDefault();
             if (bot == null)
             {
-                await ReplyAsync($"No bot found with the specified IP address ({ip}).").ConfigureAwait(false);
+                await ReplyAsync("No bot is configured.").ConfigureAwait(false);
                 return;
             }
 
-            byte[]? bytes;
+            byte[] bytes;
             try
             {
-                bytes = await bot.Bot.Connection.PixelPeek(token).ConfigureAwait(false) ?? Array.Empty<byte>();
+                bytes = await bot.Bot.Connection.PixelPeek(CancellationToken.None).ConfigureAwait(false) ?? [];
             }
             catch (Exception ex)
             {
@@ -343,26 +367,6 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             await Context.Channel.SendFileAsync(ms, img, embed: embed.Build());
         }
 
-        private static string GetBotIPFromJsonConfig()
-        {
-            try
-            {
-                // Read the file and parse the JSON
-                var jsonData = File.ReadAllText(SVRaidBot.ConfigPath);
-                var config = JObject.Parse(jsonData);
-
-                // Access the IP address from the first bot in the Bots array
-                var ip = config["Bots"]![0]!["Connection"]!["IP"]!.ToString();
-                return ip;
-            }
-            catch (Exception ex)
-            {
-                // Handle any errors that occur during reading or parsing the file
-                Console.WriteLine($"Error reading config file: {ex.Message}");
-                return "192.168.1.1"; // Default IP if error occurs
-            }
-        }
-
         [Command("addRaidParams")]
         [Alias("arp")]
         [Summary("Adds new raid parameter.")]
@@ -373,111 +377,19 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             [Summary("Story Progress Level")] int storyProgressLevel = 6,
             [Summary("Species Name (Optional)")] string? speciesName = null)
         {
-            if (seed.Length != 8 || !seed.All(c => "0123456789abcdefABCDEF".Contains(c)))
-            {
-                await ReplyAsync("Invalid seed format. Please enter a seed consisting of exactly 8 hexadecimal digits.").ConfigureAwait(false);
+            var raid = await BuildRaidAsync(seed, level, storyProgressLevel, speciesName, 0, requireSpeciesFor7: false).ConfigureAwait(false);
+            if (raid is null)
                 return;
-            }
-            if (level < 1 || level > 7)
-            {
-                await ReplyAsync("Invalid raid level. Please enter a level between 1 and 7.").ConfigureAwait(false);
-                return;
-            }
 
-            var gameProgress = ConvertToGameProgress(storyProgressLevel);
+            var newparam = NewRaid(raid, seed, level, storyProgressLevel);
+            newparam.AddedByRACommand = false;
+            newparam.Title = $"{(Species)raid.Pokemon.Species}";
+            newparam.GroupID = raid.GroupId != -1 ? raid.GroupId : null;
 
-            var settings = Hub.Config.RotatingRaidSV;
-            bool isEvent = !string.IsNullOrEmpty(speciesName);
-
-            var crystalType = level switch
-            {
-                >= 1 and <= 5 => isEvent ? (TeraCrystalType)2 : 0,
-                6 => (TeraCrystalType)1,
-                7 => (TeraCrystalType)3,
-                _ => throw new ArgumentException("Invalid difficulty level.")
-            };
-
-            int raidDeliveryGroupID = -1;
-
-            if (!string.IsNullOrEmpty(speciesName))
-            {
-                string speciesKey = string.Join("", speciesName.Split(' ')).ToLower();
-
-                if (SpeciesToGroupIDMap.TryGetValue(speciesKey, out var groupIDAndIndices))
-                {
-                    var firstRaidGroupID = groupIDAndIndices.First().GroupID;
-                    raidDeliveryGroupID = firstRaidGroupID;
-                }
-                else
-                {
-                    await ReplyAsync("Species name not recognized or not associated with an active event. Please check the name and try again.");
-                    return;
-                }
-            }
-
-            // Rest of your code remains the same...
-            var selectedMap = IsBlueberry ? TeraRaidMapParent.Blueberry : (IsKitakami ? TeraRaidMapParent.Kitakami : TeraRaidMapParent.Paldea);
-            var rewardsToShow = settings.EmbedToggles.RewardsToShow;
-            var (pk, raidEmbed) = RaidInfoCommand(
-            seed,
-            (int)crystalType,
-            selectedMap,
-            storyProgressLevel,
-            raidDeliveryGroupID,
-            rewardsToShow,
-            settings.EmbedToggles.MoveTypeEmojis,
-            settings.EmbedToggles.CustomTypeEmojis,
-            0,
-            isEvent,
-            (int)settings.EmbedToggles.EmbedLanguage);
-            var description = string.Empty;
-            var prevpath = "bodyparam.txt";
-            var filepath = "RaidFilesSV\\bodyparam.txt";
-            if (File.Exists(prevpath))
-                Directory.Move(filepath, prevpath + Path.GetFileName(filepath));
-
-            if (File.Exists(filepath))
-                description = File.ReadAllText(filepath);
-
-            var data = string.Empty;
-            var prevpk = "pkparam.txt";
-            var pkpath = "RaidFilesSV\\pkparam.txt";
-            if (File.Exists(prevpk))
-                Directory.Move(pkpath, prevpk + Path.GetFileName(pkpath));
-
-            if (File.Exists(pkpath))
-                data = File.ReadAllText(pkpath);
-
-            RotatingRaidParameters newparam = new()
-            {
-                CrystalType = crystalType,
-                DifficultyLevel = level,
-                Description = new[] { description },
-                PartyPK = new[] { "" },
-                Species = (Species)pk.Species,
-                SpeciesForm = pk.Form,
-                StoryProgress = (GameProgressEnum)gameProgress,
-                Seed = seed,
-                IsCoded = true,
-                IsShiny = pk.IsShiny,
-                AddedByRACommand = false,
-                Title = $"{(Species)pk.Species}",
-                GroupID = raidDeliveryGroupID != -1 ? raidDeliveryGroupID : null
-            };
-            // Check if Species is Ditto and set PartyPK to Showdown template
-            if (newparam.Species == Species.Ditto)
-            {
-                newparam.PartyPK = new string[] {
-                    "Happiny",
-                    "Shiny: Yes",
-                    "Level: 1"
-                };
-            }
             lock (RaidListSync.Gate)
                 RaidList.Add(newparam);
-            await Context.Message.DeleteAsync().ConfigureAwait(false);
-            var msg = $"Your new raid has been added.";
-            await ReplyAsync(msg, embed: raidEmbed).ConfigureAwait(false);
+            await TryDeleteCommandMessage().ConfigureAwait(false);
+            await ReplyAsync("Your new raid has been added.", embed: raid.Embed).ConfigureAwait(false);
         }
 
         [Command("listevents")]
@@ -486,7 +398,8 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ListEventRaids()
         {
-            if (SpeciesToGroupIDMap == null || SpeciesToGroupIDMap.Count == 0)
+            var events = SpeciesToGroupIDMap;
+            if (events == null || events.Count == 0)
             {
                 await ReplyAsync("No raids found in the SpeciesToGroupIDMap.").ConfigureAwait(false);
                 return;
@@ -495,11 +408,8 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             var sb = new StringBuilder();
             sb.AppendLine("**Found Raids:**");
 
-            foreach (var kvp in SpeciesToGroupIDMap)
+            foreach (var (speciesName, groupIDAndIndices) in events)
             {
-                var speciesName = kvp.Key;
-                var groupIDAndIndices = kvp.Value;
-
                 sb.AppendLine($"\n**{speciesName}:**");
 
                 foreach (var (GroupID, Index, DenIdentifier) in groupIDAndIndices)
@@ -508,14 +418,10 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 }
             }
 
-            // Check if the message exceeds Discord's character limit
             if (sb.Length > 2000)
             {
-                // Send the output as a file if it exceeds the limit
-                using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(sb.ToString())))
-                {
-                    await Context.Channel.SendFileAsync(stream, "RaidsList.txt", "The list is too long, so I've attached it as a file.").ConfigureAwait(false);
-                }
+                using var stream = new MemoryStream(Encoding.UTF8.GetBytes(sb.ToString()));
+                await Context.Channel.SendFileAsync(stream, "RaidsList.txt", "The list is too long, so I've attached it as a file.").ConfigureAwait(false);
             }
             else
             {
@@ -526,255 +432,119 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [Command("addUserRaid")]
         [Alias("aur", "ra")]
         [Summary("Adds new raid parameter next in the queue.")]
+        [RequireQueueRole(nameof(DiscordManager.RolesRaid))]
         public async Task AddNewRaidParamNext(
             [Summary("Seed")] string seed,
             [Summary("Difficulty Level (1-7)")] int level,
             [Summary("Story Progress Level")] int storyProgressLevel = 6,
             [Summary("Species Name or User Mention (Optional)")] string? speciesNameOrUserMention = null,
-            [Summary("User Mention 2 (Optional)")] SocketGuildUser? user2 = null,
-            [Summary("User Mention 3 (Optional)")] SocketGuildUser? user3 = null)
+            [Summary("Up to 3 users to invite to a private raid (Optional)")][Remainder] string? invites = null)
         {
-            var botPrefix = SysCordSettings.MentionOnly ? $"@{Context.Client.CurrentUser.Username} " : SysCordSettings.Settings.CommandPrefix;
-            if (Hub.Config.RotatingRaidSV.RaidSettings.DisableRequests)
+            var raidSettings = Hub.Config.RotatingRaidSV.RaidSettings;
+            if (raidSettings.DisableRequests)
             {
                 await ReplyAsync("Raid Requests are currently disabled by the host.").ConfigureAwait(false);
                 return;
             }
-            var compatible = CheckProgressandLevel(level, storyProgressLevel);
-            if (!compatible)
+            if (RaidRequestRules.CheckLevel(level, storyProgressLevel) is { } problem)
             {
-                string requiredProgress = GetRequiredProgress(level);
-                await ReplyAsync($"The selected raid difficulty level ({level}★) is not compatible with your current story progress. " +
-                                 $"To access {level}★ raids, you need to have at least {requiredProgress} in the game's story.").ConfigureAwait(false);
+                await ReplyAsync(problem).ConfigureAwait(false);
                 return;
             }
 
-            // Check if the first parameter after story progress level is a user mention
-            bool isUserMention = speciesNameOrUserMention != null && MyRegex1().IsMatch(speciesNameOrUserMention);
-            SocketGuildUser? user1 = null;
-            string? speciesName = null;
+            bool startsWithMention = speciesNameOrUserMention != null && MentionUtils.TryParseUser(speciesNameOrUserMention, out _);
+            string? speciesName = startsWithMention ? null : speciesNameOrUserMention;
 
-            if (isUserMention)
+            // Mentioned users come with the message, so members missing from the cache still count.
+            var invited = Context.MentionedUsersExceptBot().Where(u => u.Id != Context.User.Id && !u.IsBot).ToList();
+            if (startsWithMention && invited.Count == 0)
             {
-                // Extract the user ID from the mention and retrieve the user
-                var userId2 = ulong.Parse(Regex.Match(speciesNameOrUserMention!, @"\d+").Value);
-                user1 = Context.Guild.GetUser(userId2);
+                await ReplyAsync("I couldn't find anyone to invite in that message. Mention the users you want in your private raid.").ConfigureAwait(false);
+                return;
             }
-            else
-            {
-                speciesName = speciesNameOrUserMention;
-            }
-
-            // Check if private raids are enabled
-            if (!Hub.Config.RotatingRaidSV.RaidSettings.PrivateRaidsEnabled && (user1 != null || user2 != null || user3 != null))
+            if (invited.Count > 0 && !raidSettings.PrivateRaidsEnabled)
             {
                 await ReplyAsync("Private raids are currently disabled by the host.").ConfigureAwait(false);
                 return;
             }
-            // Check if the number of user mentions exceeds the limit
-            int mentionCount = (user1 != null ? 1 : 0) + (user2 != null ? 1 : 0) + (user3 != null ? 1 : 0);
-            if (mentionCount > 3)
+            if (invited.Count > MaxInvitedUsers)
             {
-                await ReplyAsync("You can only mention up to 3 users for a private raid.").ConfigureAwait(false);
+                await ReplyAsync($"You can only mention up to {MaxInvitedUsers} users for a private raid.").ConfigureAwait(false);
                 return;
             }
+
             var userId = Context.User.Id;
             if (RaidListSync.Snapshot(RaidList).Any(r => r.RequestedByUserID == userId && !r.PendingRemoval))
             {
                 await ReplyAsync("You already have an existing raid request in the queue.").ConfigureAwait(false);
                 return;
             }
+
             var userRequestManager = new UserRequestManager();
-            var userRoles = (Context.User as SocketGuildUser)?.Roles.Select(r => r.Id) ?? new List<ulong>();
-            bool limited = !Hub.Config.RotatingRaidSV.RaidSettings.BypassLimitRequests.ContainsKey(userId) &&
-                !userRoles.Any(Hub.Config.RotatingRaidSV.RaidSettings.BypassLimitRequests.ContainsKey);
+            var userRoles = (Context.User as SocketGuildUser)?.Roles.Select(r => r.Id) ?? [];
+            bool limited = !raidSettings.BypassLimitRequests.ContainsKey(userId) &&
+                !userRoles.Any(raidSettings.BypassLimitRequests.ContainsKey);
 
-            if (limited)
+            if (limited && !userRequestManager.CanRequest(userId, raidSettings.LimitRequests, raidSettings.LimitRequestsTime, out var remainingCooldown))
             {
-                if (!userRequestManager.CanRequest(userId, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequests, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequestsTime, out var remainingCooldown))
-                {
-                    string responseMessage = $"You have reached your request limit. Please wait {remainingCooldown.TotalMinutes:N0} minutes before making another request.";
+                string responseMessage = $"You have reached your request limit. Please wait {remainingCooldown.TotalMinutes:N0} minutes before making another request.";
+                if (!string.IsNullOrWhiteSpace(raidSettings.LimitRequestMsg))
+                    responseMessage += $"\n{raidSettings.LimitRequestMsg}";
 
-                    if (!string.IsNullOrWhiteSpace(Hub.Config.RotatingRaidSV.RaidSettings.LimitRequestMsg))
-                    {
-                        responseMessage += $"\n{Hub.Config.RotatingRaidSV.RaidSettings.LimitRequestMsg}";
-                    }
-
-                    await ReplyAsync(responseMessage).ConfigureAwait(false);
-                    return;
-                }
-            }
-
-            if (seed.Length != 8 || !seed.All(c => "0123456789abcdefABCDEF".Contains(c)))
-            {
-                await ReplyAsync("Invalid seed format. Please enter a seed consisting of exactly 8 hexadecimal digits.").ConfigureAwait(false);
-                return;
-            }
-            if (level == 7 && storyProgressLevel == 6 && string.IsNullOrEmpty(speciesName))
-            {
-                var availableSpecies = string.Join(", ", SpeciesToGroupIDMap.Keys);
-                await ReplyAsync($"For 7★ raids, please specify the species name. Available species: {availableSpecies}").ConfigureAwait(false);
-                return;
-            }
-            if (level < 1 || level > 7) 
-            {
-                await ReplyAsync("Invalid raid level. Please enter a level between 1 and 7.").ConfigureAwait(false); 
-                return;
-            }
-            var gameProgress = ConvertToGameProgress(storyProgressLevel);
-            if (gameProgress == GameProgress.None)
-            {
-                await ReplyAsync("Invalid Story Progress Level. Please enter a value between 1 and 6.").ConfigureAwait(false);
-                return;
-            }
-            var settings = Hub.Config.RotatingRaidSV;
-            bool isEvent = !string.IsNullOrEmpty(speciesName);
-            var selectedMap = IsBlueberry ? TeraRaidMapParent.Blueberry : (IsKitakami ? TeraRaidMapParent.Kitakami : TeraRaidMapParent.Paldea);
-
-            if (isEvent && selectedMap != TeraRaidMapParent.Paldea)
-            {
-                await ReplyAsync("Events can only be run in the Paldea map.");
-                return;
-            }
-            var crystalType = level switch
-            {
-                >= 1 and <= 5 => isEvent ? (TeraCrystalType)2 : 0,
-                6 => (TeraCrystalType)1,
-                7 => (TeraCrystalType)3,
-                _ => throw new ArgumentException("Invalid difficulty level.")
-            };
-
-            int raidDeliveryGroupID = -1;
-
-            if (isEvent && SpeciesToGroupIDMap.TryGetValue(speciesName!, out var groupIDAndIndices))
-            {
-                var firstRaidGroupID = groupIDAndIndices.First().GroupID;
-                raidDeliveryGroupID = firstRaidGroupID;
-            }
-            else if (isEvent)
-            {
-                await ReplyAsync("Species name not recognized or not associated with an active event. Please check the name and try again.");
+                await ReplyAsync(responseMessage).ConfigureAwait(false);
                 return;
             }
 
-            if (isEvent)
-            {
-                // Might events are 7★ and Distribution events are 1-5★; the event decides, not the level typed.
-                if (EventCrystalFor(speciesName!, level) is not { } eventCrystal)
-                {
-                    string kind = EventCrystalFor(speciesName!, 7) is not null ? "a 7★ Might raid" : "a 1-5★ event raid";
-                    await ReplyAsync($"The {speciesName} event is {kind}, not {level}★. Please request it at that difficulty.").ConfigureAwait(false);
-                    return;
-                }
-                crystalType = eventCrystal;
-            }
+            var raid = await BuildRaidAsync(seed, level, storyProgressLevel, speciesName, 1, requireSpeciesFor7: true).ConfigureAwait(false);
+            if (raid is null)
+                return;
 
-            int effectiveQueuePosition = 1;
-            var rewardsToShow = settings.EmbedToggles.RewardsToShow;
-            var (pk, raidEmbed) = RaidInfoCommand(
-            seed,
-            (int)crystalType,
-            selectedMap,
-            storyProgressLevel,
-            raidDeliveryGroupID,
-            rewardsToShow,
-            settings.EmbedToggles.MoveTypeEmojis,
-            settings.EmbedToggles.CustomTypeEmojis,
-            effectiveQueuePosition,
-            isEvent,
-            (int)settings.EmbedToggles.EmbedLanguage);
-            var description = string.Empty;
-            var prevpath = "bodyparam.txt";
-            var filepath = "RaidFilesSV\\bodyparam.txt";
-            if (File.Exists(prevpath))
-                Directory.Move(filepath, prevpath + Path.GetFileName(filepath));
+            var botPrefix = SysCordSettings.MentionOnly ? $"@{Context.Client.CurrentUser.Username} " : SysCordSettings.Settings.CommandPrefix;
+            var newparam = NewRaid(raid, seed, level, storyProgressLevel);
+            newparam.GroupID = raid.GroupId;
+            newparam.AddedByRACommand = true;
+            newparam.RequestCommand = $"{botPrefix}ra {seed} {level} {storyProgressLevel}{(raid.IsEvent ? $" {speciesName}" : "")}";
+            newparam.RequestedByUserID = userId;
+            newparam.Title = $"{Context.User.Username}'s Requested Raid{(raid.IsEvent ? $" ({speciesName} Event Raid)" : "")}";
+            newparam.RaidUpNext = false;
+            newparam.User = Context.User;
+            newparam.MentionedUsers = invited;
 
-            if (File.Exists(filepath))
-                description = File.ReadAllText(filepath);
-
-            var data = string.Empty;
-            var prevpk = "pkparam.txt";
-            var pkpath = "RaidFilesSV\\pkparam.txt";
-            if (File.Exists(prevpk))
-                Directory.Move(pkpath, prevpk + Path.GetFileName(pkpath));
-
-            if (File.Exists(pkpath))
-                data = File.ReadAllText(pkpath);
-
-            RotatingRaidParameters newparam = new()
-            {
-                CrystalType = crystalType,
-                Description = new[] { description },
-                PartyPK = new[] { "" },
-                Species = (Species)pk.Species,
-                DifficultyLevel = level,
-                SpeciesForm = pk.Form,
-                StoryProgress = (GameProgressEnum)gameProgress,
-                Seed = seed,
-                IsCoded = true,
-                IsShiny = pk.IsShiny,
-                GroupID = raidDeliveryGroupID,
-                AddedByRACommand = true,
-                RequestCommand = $"{botPrefix}ra {seed} {level} {storyProgressLevel}{(isEvent ? $" {speciesName}" : "")}",
-                RequestedByUserID = Context.User.Id,
-                Title = $"{Context.User.Username}'s Requested Raid{(isEvent ? $" ({speciesName} Event Raid)" : "")}",
-                RaidUpNext = false,
-                User = Context.User,
-                MentionedUsers = new List<SocketUser?> { user1, user2, user3 }.OfType<SocketUser>().ToList(),
-            };
-
-            // Check if Species is Ditto and set PartyPK to Showdown template
-            if (newparam.Species == Species.Ditto)
-            {
-                newparam.PartyPK = new string[] {
-                    "Happiny",
-                    "Shiny: Yes",
-                    "Level: 1"
-                };
-            }
+            bool alreadyQueued;
             lock (RaidListSync.Gate)
             {
-                if (RaidList.Any(r => r.RequestedByUserID == userId && !r.PendingRemoval))
+                alreadyQueued = RaidList.Any(r => r.RequestedByUserID == userId && !r.PendingRemoval);
+                if (!alreadyQueued)
                 {
-                    _ = ReplyAsync("You already have an existing raid request in the queue.");
-                    return;
+                    // After the raid being hosted, behind any requests already waiting there
+                    int insertPosition = Math.Min(RotationCount + 1, RaidList.Count);
+                    while (insertPosition < RaidList.Count && RaidList[insertPosition].AddedByRACommand)
+                        insertPosition++;
+                    newparam.RaidUpNext = insertPosition == RotationCount + 1;
+                    RaidList.Insert(insertPosition, newparam);
                 }
-
-                // After the raid being hosted, behind any requests already waiting there
-                int insertPosition = Math.Min(RotationCount + 1, RaidList.Count);
-                while (insertPosition < RaidList.Count && RaidList[insertPosition].AddedByRACommand)
-                {
-                    insertPosition++;
-                }
-                newparam.RaidUpNext = insertPosition == RotationCount + 1;
-                RaidList.Insert(insertPosition, newparam);
+            }
+            if (alreadyQueued)
+            {
+                await ReplyAsync("You already have an existing raid request in the queue.").ConfigureAwait(false);
+                return;
             }
 
             if (limited)
-                userRequestManager.RecordRequest(userId, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequests, Hub.Config.RotatingRaidSV.RaidSettings.LimitRequestsTime);
+                userRequestManager.RecordRequest(userId, raidSettings.LimitRequests, raidSettings.LimitRequestsTime);
 
-            // Calculate the user's position in the queue and the estimated wait time
-            effectiveQueuePosition = CalculateEffectiveQueuePosition(Context.User.Id, RotationCount);
-            int etaMinutes = effectiveQueuePosition * 6;
-
-            var queuePositionMessage = effectiveQueuePosition > 0
-                ? $"You are currently {effectiveQueuePosition} in the queue with an estimated wait time of {etaMinutes} minutes."
+            int queuePosition = CalculateEffectiveQueuePosition(userId, RotationCount);
+            var queuePositionMessage = queuePosition > 0
+                ? $"You are currently {queuePosition} in the queue with an estimated wait time of {queuePosition * MinutesPerRaid} minutes."
                 : "Your raid request is up next!";
 
-            var replyMsg = $"{Context.User.Mention}, added your raid to the queue! I'll DM you when it's about to start.";
-            await ReplyAsync(replyMsg, embed: raidEmbed).ConfigureAwait(false);
+            await ReplyAsync($"{Context.User.Mention}, added your raid to the queue! I'll DM you when it's about to start.", embed: raid.Embed).ConfigureAwait(false);
 
-            // Notify the mentioned users
-            var mentionedUsers = new List<SocketGuildUser>();
-            if (user1 != null) mentionedUsers.Add(user1);
-            if (user2 != null) mentionedUsers.Add(user2);
-            if (user3 != null) mentionedUsers.Add(user3);
-
-            foreach (var user in mentionedUsers)
+            foreach (var user in invited)
             {
                 try
                 {
-                    await user.SendMessageAsync($"{Context.User.Username} invited you to a private raid! I'll DM you the code when it's about to start.", false, raidEmbed).ConfigureAwait(false);
+                    await user.SendMessageAsync($"{Context.User.Username} invited you to a private raid! I'll DM you the code when it's about to start.", false, raid.Embed).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -783,62 +553,12 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             }
             try
             {
-                if (Context.User is SocketGuildUser user)
-                {
-                    await user.SendMessageAsync($"Here's your raid information:\n{queuePositionMessage}\nYour request command: `{newparam.RequestCommand}`", false, raidEmbed).ConfigureAwait(false);
-                }
-                else
-                {
-                    await ReplyAsync("Failed to send DM. Please make sure your DMs are open.").ConfigureAwait(false);
-                }
+                await Context.User.SendMessageAsync($"Here's your raid information:\n{queuePositionMessage}\nYour request command: `{newparam.RequestCommand}`", false, raid.Embed).ConfigureAwait(false);
             }
             catch
             {
                 await ReplyAsync("Failed to send DM. Please make sure your DMs are open.").ConfigureAwait(false);
             }
-        }
-
-        public GameProgress ConvertToGameProgress(int storyProgressLevel)
-        {
-            return storyProgressLevel switch
-            {
-                6 => GameProgress.Unlocked6Stars,
-                5 => GameProgress.Unlocked5Stars,
-                4 => GameProgress.Unlocked4Stars,
-                3 => GameProgress.Unlocked3Stars,
-                2 => GameProgress.UnlockedTeraRaids,
-                1 => GameProgress.UnlockedTeraRaids,
-                _ => GameProgress.Unlocked6Stars
-            };
-        }
-
-        public bool CheckProgressandLevel(int level, int storyProgressLevel)
-        {
-            switch (storyProgressLevel)
-            {
-                case 6: // Unlocked 6 Stars
-                    return level >= 3 && level <= 7;
-                case 5: // Unlocked 5 Stars
-                    return level >= 3 && level <= 5;
-                case 4: // Unlocked 4 Stars
-                    return level >= 3 && level <= 4;
-                case 3: // Unlocked 3 Stars
-                    return level == 3;
-                default: return false; // No 1 or 2 Star Unlocked
-            }
-        }
-
-        public string GetRequiredProgress(int level)
-        {
-            return level switch
-            {
-                7 => "6☆ Unlocked Progress",
-                6 => "6☆ Unlocked Progress",
-                5 => "5☆ Unlocked Progress",
-                4 => "4☆ Unlocked Progress",
-                3 => "3☆ Unlocked Progress",
-                _ => throw new ArgumentException("Invalid Story Progress Level... where are you getting your seeds?\nUse <https://genpkm.com/seeds.html> to get them."),
-            };
         }
 
         [Command("addRaidPK")]
@@ -877,7 +597,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 if (raidToUpdate != null)
                 {
                     raidToUpdate.PartyPK = partyPK;
-                    await Context.Message.DeleteAsync().ConfigureAwait(false);
+                    await TryDeleteCommandMessage().ConfigureAwait(false);
                     var embed = await RPEmbed.PokeEmbedAsync(pkm, Context.User.Username);
                     await ReplyAsync(embed: embed).ConfigureAwait(false);
                 }
@@ -914,25 +634,20 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 await ReplyAsync("Attachment provided is not compatible with this module!").ConfigureAwait(false);
                 return;
             }
-            else
+
+            var userId = Context.User.Id;
+            var raidToUpdate = RaidListSync.Snapshot(RaidList).FirstOrDefault(r => r.RequestedByUserID == userId && !r.PendingRemoval);
+            if (raidToUpdate == null)
             {
-                var userId = Context.User.Id;
-                var raidToUpdate = RaidListSync.Snapshot(RaidList).FirstOrDefault(r => r.RequestedByUserID == userId && !r.PendingRemoval);
-                var set = ShowdownParsing.GetShowdownText(pk);
-                string[] partyPK = set.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                if (raidToUpdate != null)
-                {
-                    raidToUpdate.PartyPK = partyPK;
-                    await Context.Message.DeleteAsync().ConfigureAwait(false);
-                    var embed = await RPEmbed.PokeEmbedAsync(pk, Context.User.Username);
-                    await ReplyAsync(embed: embed).ConfigureAwait(false);
-                }
-                else
-                {
-                    var msg = "You don't have a raid in queue!";
-                    await ReplyAsync(msg).ConfigureAwait(false);
-                }
+                await ReplyAsync("You don't have a raid in queue!").ConfigureAwait(false);
+                return;
             }
+
+            var set = ShowdownParsing.GetShowdownText(pk);
+            raidToUpdate.PartyPK = set.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            await TryDeleteCommandMessage().ConfigureAwait(false);
+            var embed = await RPEmbed.PokeEmbedAsync(pk, Context.User.Username);
+            await ReplyAsync(embed: embed).ConfigureAwait(false);
         }
 
         [Command("raidQueueStatus")]
@@ -941,44 +656,32 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         public async Task CheckQueueStatus()
         {
             var userId = Context.User.Id;
-            int currentPosition = RotationCount;
+            var userRequestIndex = RaidListSync.Snapshot(RaidList).FindIndex(r => r.RequestedByUserID == userId && !r.PendingRemoval && !r.Title.Contains(MysteryRaidTitle));
 
-            // Find the index of the user's request in the queue, excluding Mystery Shiny Raids
-            var userRequestIndex = RaidListSync.Snapshot(RaidList).FindIndex(r => r.RequestedByUserID == userId && !r.PendingRemoval && !r.Title.Contains("Mystery Shiny Raid"));
-
-            EmbedBuilder embed = new();
-
+            var embed = new EmbedBuilder { Title = "Queue Status" };
             if (userRequestIndex == -1)
             {
-                embed.Title = "Queue Status";
                 embed.Color = Color.Red;
                 embed.Description = $"{Context.User.Mention}, you do not have a raid request in the queue.";
             }
             else
             {
-                // Calculate the effective position of the user's request in the queue
-                int raidsBeforeUser = CalculateEffectiveQueuePosition(userId, currentPosition);
-
+                int raidsBeforeUser = CalculateEffectiveQueuePosition(userId, RotationCount);
                 if (raidsBeforeUser <= 0)
                 {
-                    embed.Title = "Queue Status";
                     embed.Color = Color.Green;
                     embed.Description = $"{Context.User.Mention}, your raid request is up next!";
                 }
                 else
                 {
-                    // Calculate ETA assuming each raid takes 6 minutes
-                    int etaMinutes = raidsBeforeUser * 6;
-
-                    embed.Title = "Queue Status";
                     embed.Color = Color.Orange;
                     embed.Description = $"{Context.User.Mention}, here's the status of your raid request:";
                     embed.AddField("Raids Before Yours", raidsBeforeUser.ToString(), true);
-                    embed.AddField("Estimated Time", $"{etaMinutes} minutes", true);
+                    embed.AddField("Estimated Time", $"{raidsBeforeUser * MinutesPerRaid} minutes", true);
                 }
             }
 
-            await Context.Message.DeleteAsync().ConfigureAwait(false);
+            await TryDeleteCommandMessage().ConfigureAwait(false);
             await ReplyAsync(embed: embed.Build()).ConfigureAwait(false);
         }
 
@@ -993,23 +696,15 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
 
             for (int i = currentPosition; i < raids.Count + currentPosition; i++)
             {
-                int actualIndex = i % raids.Count;
-                var raid = raids[actualIndex];
-
-                // Check if the raid is added by the RA command and is not a Mystery Shiny Raid
-                if (raid.AddedByRACommand && !raid.Title.Contains("Mystery Shiny Raid"))
+                var raid = raids[i % raids.Count];
+                if (raid.AddedByRACommand && !raid.Title.Contains(MysteryRaidTitle))
                 {
                     if (raid.RequestedByUserID == userId)
                     {
-                        // Found the user's request
                         userRequestFound = true;
                         break;
                     }
-                    else if (!userRequestFound)
-                    {
-                        // Count other user requested raids before the user's request
-                        effectivePosition++;
-                    }
+                    effectivePosition++;
                 }
             }
 
@@ -1019,17 +714,11 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 for (int i = 0; i < currentPosition; i++)
                 {
                     var raid = raids[i];
-                    if (raid.AddedByRACommand && !raid.Title.Contains("Mystery Shiny Raid"))
+                    if (raid.AddedByRACommand && !raid.Title.Contains(MysteryRaidTitle))
                     {
                         if (raid.RequestedByUserID == userId)
-                        {
-                            // Found the user's request
                             break;
-                        }
-                        else
-                        {
-                            effectivePosition++;
-                        }
+                        effectivePosition++;
                     }
                 }
             }
@@ -1044,7 +733,6 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         {
             var userId = Context.User.Id;
 
-            // Find the raid added by the user
             var userRaid = RaidListSync.Snapshot(RaidList).FirstOrDefault(r => r.RequestedByUserID == userId && r.AddedByRACommand && !r.PendingRemoval);
             if (userRaid == null)
             {
@@ -1052,18 +740,36 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 return;
             }
 
-            // Prevent canceling if the raid is up next
             if (userRaid.RaidUpNext)
             {
                 await ReplyAsync("Your raid request is up next and cannot be canceled at this time.").ConfigureAwait(false);
                 return;
             }
 
-            // Remove the raid if it's not up next
             RemoveRaid(userRaid);
-            await Context.Message.DeleteAsync().ConfigureAwait(false);
-            var msg = $"Cleared your Raid from the queue.";
-            await ReplyAsync(msg).ConfigureAwait(false);
+            await TryDeleteCommandMessage().ConfigureAwait(false);
+            await ReplyAsync("Cleared your Raid from the queue.").ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// The raid at <paramref name="index"/> when a sudo command may edit it; otherwise replies why not and returns null.
+        /// </summary>
+        private async Task<RotatingRaidParameters?> GetEditableRaidAsync(int index)
+        {
+            var list = RaidListSync.Snapshot(RaidList);
+            if (index < 0 || index >= list.Count)
+            {
+                await ReplyAsync("Invalid raid parameter index.").ConfigureAwait(false);
+                return null;
+            }
+
+            var raid = list[index];
+            if (raid.WebRequest is not null)
+            {
+                await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
+                return null;
+            }
+            return raid;
         }
 
         [Command("removeRaidParams")]
@@ -1072,21 +778,11 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task RemoveRaidParam([Summary("Seed Index")] int index)
         {
-            var list = RaidListSync.Snapshot(RaidList);
-            if (index >= 0 && index < list.Count)
-            {
-                var raid = list[index];
-                if (raid.WebRequest is not null)
-                {
-                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
-                    return;
-                }
-                RemoveRaid(raid);
-                var msg = $"Raid for {raid.Title} | {raid.Seed:X8} has been removed!";
-                await ReplyAsync(msg).ConfigureAwait(false);
-            }
-            else
-                await ReplyAsync("Invalid raid parameter index.").ConfigureAwait(false);
+            if (await GetEditableRaidAsync(index).ConfigureAwait(false) is not { } raid)
+                return;
+
+            RemoveRaid(raid);
+            await ReplyAsync($"Raid for {raid.Title} | {raid.Seed:X8} has been removed!").ConfigureAwait(false);
         }
 
         [Command("toggleRaidParams")]
@@ -1095,29 +791,19 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ToggleRaidParam([Summary("Seed Index")] int index)
         {
-            var list = RaidListSync.Snapshot(RaidList);
-            if (index >= 0 && index < list.Count)
+            if (await GetEditableRaidAsync(index).ConfigureAwait(false) is not { } raid)
+                return;
+
+            // A request switched off would sit in the list forever and block its owner from asking again.
+            if (raid.AddedByRACommand && raid.ActiveInRotation && !raid.Title.Contains(MysteryRaidTitle))
             {
-                var raid = list[index];
-                if (raid.WebRequest is not null)
-                {
-                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
-                    return;
-                }
-                // A request switched off would sit in the list forever and block its owner from asking again.
-                if (raid.AddedByRACommand && raid.ActiveInRotation && !raid.Title.Contains("Mystery Shiny Raid"))
-                {
-                    RemoveRaid(raid);
-                    await ReplyAsync($"Request {raid.Title} | {raid.Seed:X8} was canceled and removed from the queue.").ConfigureAwait(false);
-                    return;
-                }
-                raid.ActiveInRotation = !raid.ActiveInRotation;
-                var m = raid.ActiveInRotation ? "enabled" : "disabled";
-                var msg = $"Raid for {raid.Title} | {raid.Seed:X8} has been {m}!";
-                await ReplyAsync(msg).ConfigureAwait(false);
+                RemoveRaid(raid);
+                await ReplyAsync($"Request {raid.Title} | {raid.Seed:X8} was canceled and removed from the queue.").ConfigureAwait(false);
+                return;
             }
-            else
-                await ReplyAsync("Invalid raid parameter Index.").ConfigureAwait(false);
+            raid.ActiveInRotation = !raid.ActiveInRotation;
+            var m = raid.ActiveInRotation ? "enabled" : "disabled";
+            await ReplyAsync($"Raid for {raid.Title} | {raid.Seed:X8} has been {m}!").ConfigureAwait(false);
         }
 
         [Command("togglecodeRaidParams")]
@@ -1126,22 +812,12 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ToggleCodeRaidParam([Summary("Seed Index")] int index)
         {
-            var list = RaidListSync.Snapshot(RaidList);
-            if (index >= 0 && index < list.Count)
-            {
-                var raid = list[index];
-                if (raid.WebRequest is not null)
-                {
-                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
-                    return;
-                }
-                raid.IsCoded = !raid.IsCoded;
-                var m = raid.IsCoded ? "coded" : "uncoded";
-                var msg = $"Raid for {raid.Title} | {raid.Seed:X8} is now {m}!";
-                await ReplyAsync(msg).ConfigureAwait(false);
-            }
-            else
-                await ReplyAsync("Invalid raid parameter Index.").ConfigureAwait(false);
+            if (await GetEditableRaidAsync(index).ConfigureAwait(false) is not { } raid)
+                return;
+
+            raid.IsCoded = !raid.IsCoded;
+            var m = raid.IsCoded ? "coded" : "uncoded";
+            await ReplyAsync($"Raid for {raid.Title} | {raid.Seed:X8} is now {m}!").ConfigureAwait(false);
         }
 
         [Command("changeRaidParamTitle")]
@@ -1150,21 +826,12 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ChangeRaidParamTitle([Summary("Seed Index")] int index, [Summary("Title")] string title)
         {
-            var list = RaidListSync.Snapshot(RaidList);
-            if (index >= 0 && index < list.Count)
-            {
-                var raid = list[index];
-                if (raid.WebRequest is not null)
-                {
-                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
-                    return;
-                }
-                raid.Title = title;
-                var msg = $"Raid Title for {raid.Title} | {raid.Seed:X8} has been changed to: {title}!";
-                await ReplyAsync(msg).ConfigureAwait(false);
-            }
-            else
-                await ReplyAsync("Invalid raid parameter Index.").ConfigureAwait(false);
+            if (await GetEditableRaidAsync(index).ConfigureAwait(false) is not { } raid)
+                return;
+
+            var oldTitle = raid.Title;
+            raid.Title = title;
+            await ReplyAsync($"Raid Title for {oldTitle} | {raid.Seed:X8} has been changed to: {title}!").ConfigureAwait(false);
         }
 
         [Command("viewraidList")]
@@ -1172,27 +839,24 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [Summary("Prints the raids in the current collection.")]
         public async Task GetRaidListAsync()
         {
+            const string title = "Raid List";
             var list = RaidListSync.Snapshot(RaidList);
-            int count = list.Count;
-            int fields = (int)Math.Ceiling((double)count / 15);
-            var embed = new EmbedBuilder
+            var lines = list.Select((raid, i) => $"{i}.) {raid.Title} - {raid.Seed} - Status: {(raid.ActiveInRotation ? "Active" : "Inactive")}").ToList();
+            var header = $"These are the raids currently in the list (total: {list.Count}):";
+
+            var fields = RaidRequestRules.PackIntoFields(lines);
+            static string FieldName(int i) => $"Raid List - Part {i + 1}";
+            if (!RaidRequestRules.FitsInOneEmbed(fields, FieldName, title))
             {
-                Title = "Raid List"
-            };
-            for (int i = 0; i < fields; i++)
-            {
-                int start = i * 15;
-                int end = Math.Min(start + 14, count - 1);
-                var fieldBuilder = new StringBuilder();
-                for (int j = start; j <= end; j++)
-                {
-                    var raid = list[j];
-                    int paramNumber = j;
-                    fieldBuilder.AppendLine($"{paramNumber}.) {raid.Title} - {raid.Seed} - Status: {(raid.ActiveInRotation ? "Active" : "Inactive")}");
-                }
-                embed.AddField($"Raid List - Part {i + 1}", fieldBuilder.ToString(), false);
+                using var stream = new MemoryStream(Encoding.UTF8.GetBytes(string.Join("\n", lines)));
+                await Context.Channel.SendFileAsync(stream, "RaidList.txt", $"{header} The list is too long for an embed, so I've attached it as a file.").ConfigureAwait(false);
+                return;
             }
-            await ReplyAsync($"These are the raids currently in the list (total: {count}):", embed: embed.Build()).ConfigureAwait(false);
+
+            var embed = new EmbedBuilder { Title = title };
+            for (int i = 0; i < fields.Count; i++)
+                embed.AddField(FieldName(i), fields[i], false);
+            await ReplyAsync(header, embed: embed.Build()).ConfigureAwait(false);
         }
 
         [Command("toggleRaidPK")]
@@ -1201,22 +865,11 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task ToggleRaidParamPK([Summary("Seed Index")] int index, [Summary("Showdown Set")][Remainder] string content)
         {
-            var list = RaidListSync.Snapshot(RaidList);
-            if (index >= 0 && index < list.Count)
-            {
-                var raid = list[index];
-                if (raid.WebRequest is not null)
-                {
-                    await ReplyAsync(WebRequestLocked).ConfigureAwait(false);
-                    return;
-                }
-                raid.PartyPK = new[] { content };
-                var m = string.Join("\n", raid.PartyPK);
-                var msg = $"RaidPK for {raid.Title} | {raid.Seed:X8} has been updated to:\n{m}!";
-                await ReplyAsync(msg).ConfigureAwait(false);
-            }
-            else
-                await ReplyAsync("Invalid raid parameter Index.").ConfigureAwait(false);
+            if (await GetEditableRaidAsync(index).ConfigureAwait(false) is not { } raid)
+                return;
+
+            raid.PartyPK = [content];
+            await ReplyAsync($"RaidPK for {raid.Title} | {raid.Seed:X8} has been updated to:\n{content}!").ConfigureAwait(false);
         }
 
         [Command("raidhelp")]
@@ -1224,25 +877,18 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [Summary("Prints the raid help command list.")]
         public async Task GetRaidHelpListAsync()
         {
-            var embed = new EmbedBuilder();
-            List<string> cmds = new()
-            {
-                "$ban - Ban a user from raids via NID. [Command] [OT] - Sudo only command.\n",
-                "$vrl - View all raids in the list.\n",
-                "$arp - Add parameter to the collection.\nEx: [Command] [Index] [Species] [Difficulty]\n",
-                "$rrp - Remove parameter from the collection.\nEx: [Command] [Index]\n",
-                "$trp - Toggle the parameter as Active/Inactive in the collection.\nEx: [Command] [Index]\n",
-                "$tcrp - Toggle the parameter as Coded/Uncoded in the collection.\nEx: [Command] [Index]\n",
-                "$trpk - Set a PartyPK for the parameter via a showdown set.\nEx: [Command] [Index] [ShowdownSet]\n",
-                "$crpt - Set the title for the parameter.\nEx: [Command] [Index]"
-            };
-            string msg = string.Join("", cmds.ToList());
-            embed.AddField(x =>
-            {
-                x.Name = "Raid Help Commands";
-                x.Value = msg;
-                x.IsInline = false;
-            });
+            var bot = Context.Client.CurrentUser;
+            string Use(string command) => SysCordSettings.CommandUsage(bot, command);
+            var msg = string.Join("\n",
+                $"{Use("ban <OT>")} or {Use("banNID <NID> <comment>")} - Ban a raider. Sudo only.",
+                $"{Use("vrl")} - View all raids in the list.",
+                $"{Use("arp <Seed> <Difficulty> <StoryProgress> [Species]")} - Add a raid to the collection.",
+                $"{Use("rrp <Index>")} - Remove a raid from the collection.",
+                $"{Use("trp <Index>")} - Toggle a raid Active/Inactive.",
+                $"{Use("tcrp <Index>")} - Toggle a raid Coded/Uncoded.",
+                $"{Use("trpk <Index> <ShowdownSet>")} - Set the PartyPK for a raid.",
+                $"{Use("crpt <Index> <Title>")} - Set the title for a raid.");
+            var embed = new EmbedBuilder().AddField("Raid Help Commands", msg, false);
             await ReplyAsync("Here's your raid help!", embed: embed.Build()).ConfigureAwait(false);
         }
 
@@ -1281,8 +927,5 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
                 _ => EntityConverter.ConvertToType(dl.Data, typeof(T), out _) as T,
             };
         }
-
-        [GeneratedRegex(@"^<@!?\d+>$")]
-        private static partial Regex MyRegex1();
     }
 }
