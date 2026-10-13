@@ -238,7 +238,6 @@ public static class WebApiExtensions
 
         var parts = command.Split(':');
         var cmd = parts[0].ToUpperInvariant();
-        var botId = parts.Length > 1 ? parts[1] : null;
 
         return cmd switch
         {
@@ -252,8 +251,6 @@ public static class WebApiExtensions
             "SCREENONALL" => ExecuteGlobalCommand(BotControlCommand.ScreenOnAll),
             "SCREENOFFALL" => ExecuteGlobalCommand(BotControlCommand.ScreenOffAll),
             "LISTBOTS" => GetBotsList(),
-            "STATUS" => GetBotStatuses(botId),
-            "ISREADY" => CheckReady(),
             "INFO" => GetInstanceInfo(),
             "VERSION" => SVRaidBot.Version,
             "UPDATE" => TriggerUpdate(),
@@ -367,62 +364,17 @@ public static class WebApiExtensions
         }
     }
 
-    private static string GetBotStatuses(string? botId)
-    {
-        try
-        {
-            var config = GetConfig();
-            var controllers = GetBotControllers();
-
-            if (string.IsNullOrEmpty(botId))
-            {
-                var statuses = controllers.Select(c => new
-                {
-                    Id = $"{c.State.Connection.IP}:{c.State.Connection.Port}",
-                    Name = GetBotName(c.State, config),
-                    Status = c.ReadBotState()
-                }).ToList();
-
-                return System.Text.Json.JsonSerializer.Serialize(statuses);
-            }
-
-            var botController = controllers.FirstOrDefault(c =>
-                $"{c.State.Connection.IP}:{c.State.Connection.Port}" == botId);
-
-            return botController?.ReadBotState() ?? "ERROR: Bot not found";
-        }
-        catch (Exception ex)
-        {
-            return $"ERROR: Failed to get status - {ex.Message}";
-        }
-    }
-
-    private static string CheckReady()
-    {
-        try
-        {
-            var controllers = GetBotControllers();
-            var hasRunningBots = controllers.Any(c => c.GetBot()?.IsRunning ?? false);
-            return hasRunningBots ? "READY" : "NOT_READY";
-        }
-        catch
-        {
-            return "NOT_READY";
-        }
-    }
-
     private static string GetInstanceInfo()
     {
         try
         {
             var config = GetConfig();
-            var version = GetVersion();
             var mode = config?.Mode.ToString() ?? "Unknown";
-            var name = GetInstanceName(config, mode);
+            var name = string.IsNullOrEmpty(config?.Hub?.BotName) ? "SVRaidBot" : config.Hub.BotName;
 
             var info = new
             {
-                Version = version,
+                Version = SVRaidBot.Version,
                 Mode = mode,
                 Name = name,
                 Environment.ProcessId,
@@ -461,27 +413,6 @@ public static class WebApiExtensions
     {
         // Always return IP address as the bot name
         return state.Connection.IP;
-    }
-
-    private static string GetVersion()
-    {
-        return SVRaidBot.Version;
-    }
-
-    private static string GetInstanceName(ProgramConfig? config, string mode)
-    {
-        if (!string.IsNullOrEmpty(config?.Hub?.BotName))
-            return config.Hub.BotName;
-
-        return mode switch
-        {
-            "LGPE" => "LGPE",
-            "BDSP" => "BDSP",
-            "SWSH" => "SWSH",
-            "SV" => "SV",
-            "LA" => "LA",
-            _ => "SVRaidBot"
-        };
     }
 
     private static void CreatePortFile()

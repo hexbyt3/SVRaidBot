@@ -23,7 +23,6 @@ namespace SysBot.Pokemon.WinForms
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         internal ProgramConfig Config { get; set; } = null!; // set in InitializeAsync before use
         private IPokeBotRunner RunningEnvironment { get; set; } = null!; // set in InitializeAsync before use
-        public readonly ISwitchConnectionAsync? SwitchConnection;
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public static bool IsUpdating { get; set; } = false;
         private System.Windows.Forms.Timer? _autoSaveTimer;
@@ -38,16 +37,6 @@ namespace SysBot.Pokemon.WinForms
         {
             InitializeComponent();
             Load += async (sender, e) => await InitializeAsync();
-
-            // Initialize dummy controls for compatibility
-            TC_Main = new TabControl { Visible = false };
-            Tab_Bots = new TabPage();
-            Tab_Hub = new TabPage();
-            Tab_Logs = new TabPage();
-            TC_Main.TabPages.AddRange(new[] { Tab_Bots, Tab_Hub, Tab_Logs });
-            comboBox1 = new ComboBox { Visible = false };
-            TC_Main.SendToBack();
-            comboBox1.SendToBack();
         }
 
         private async Task InitializeAsync()

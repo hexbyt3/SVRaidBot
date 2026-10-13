@@ -359,3 +359,6 @@ SysBot.Pokemon/SV/BotEncounter/EncounterBotReset.cs
 # Claude Code files
 .claude/
 CLAUDE.md
+
+# MSBuild SDK resolver scratch files
+*.SdkResolver.*.proj

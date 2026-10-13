@@ -21,7 +21,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     private Thread? _listenerThread;
     private readonly int _port = port;
     private readonly int _tcpPort = tcpPort;
-    private readonly CancellationTokenSource _cts = new();
     private readonly Main _mainForm = mainForm ?? throw new ArgumentNullException(nameof(mainForm));
     private volatile bool _running;
     private string? _htmlTemplate;
@@ -109,7 +108,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
         try
         {
             _running = false;
-            _cts.Cancel();
             _listener?.Stop();
             _listenerThread?.Join(5000);
         }
@@ -195,8 +193,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             {
                 "/" => HtmlTemplate,
                 "/api/bot/instances" => GetInstances(),
-                var path when path?.StartsWith("/api/bot/instances/") == true && path.EndsWith("/bots") =>
-                    GetBots(ExtractPort(path)),
                 var path when path?.StartsWith("/api/bot/instances/") == true && path.EndsWith("/command") =>
                     await RunCommand(request, ExtractPort(path)),
                 "/api/bot/command/all" => await RunAllCommand(request),
@@ -537,7 +533,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
             Mode = mode,
             BotCount = botStatuses.Count,
             IsOnline = true,
-            IsMaster = true,
             BotStatuses = botStatuses
         };
     }
@@ -667,33 +662,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
         {
             return false;
         }
-    }
-
-    private string GetBots(int port)
-    {
-        if (port == _tcpPort)
-        {
-            var config = GetConfig();
-            var controllers = GetBotControllers();
-
-            var bots = controllers.Select(c => new BotInfo
-            {
-                Id = $"{c.State.Connection.IP}:{c.State.Connection.Port}",
-                Name = GetBotName(c.State, config),
-                RoutineType = c.State.InitialRoutine.ToString(),
-                Status = c.ReadBotState(),
-                ConnectionType = c.State.Connection.Protocol.ToString(),
-                IP = c.State.Connection.IP,
-                Port = c.State.Connection.Port
-            }).ToList();
-
-            return JsonSerializer.Serialize(new { Bots = bots });
-        }
-
-        if (!IsKnownInstance(port))
-            return CreateErrorResponse("Unknown instance");
-
-        return QueryRemote(port, "LISTBOTS");
     }
 
     private static readonly HashSet<string> PanelCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -902,7 +870,6 @@ public class BotServer(Main mainForm, int port = 9090, int tcpPort = 9091) : IDi
     {
         Stop();
         _listener?.Close();
-        _cts?.Dispose();
     }
 }
 
@@ -915,7 +882,6 @@ public class BotInstance
     public int BotCount { get; set; }
     public string Mode { get; set; } = string.Empty;
     public bool IsOnline { get; set; }
-    public bool IsMaster { get; set; }
     public List<BotStatusInfo>? BotStatuses { get; set; }
 }
 
@@ -939,7 +905,6 @@ public class BotInfo
 public class BotCommandRequest
 {
     public string Command { get; set; } = string.Empty;
-    public string? BotId { get; set; }
 }
 
 public class CommandResponse
