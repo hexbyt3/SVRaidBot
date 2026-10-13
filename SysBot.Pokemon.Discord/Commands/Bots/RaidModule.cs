@@ -27,7 +27,6 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         private const string WebRequestLocked = "That is a GenPKM member's request. It finishes or times out on its own, and the member is kept up to date on the site.";
 
         // Same title RotatingRaidBotSV gives the raids it rolls itself.
-        private const string MysteryRaidTitle = "Mystery Shiny Raid";
         private const int MinutesPerRaid = 6;
         private const int MaxInvitedUsers = 3;
 

@@ -153,7 +153,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         private const int DenFailuresBeforeMapRefresh = 3;
 
         // Constants for raid type identification
-        private const string MysteryRaidTitle = "Mystery Shiny Raid";
+        public const string MysteryRaidTitle = "Mystery Shiny Raid";
         private const string UserRequestedRaidSuffix = "'s Requested Raid";
 
 
@@ -3031,7 +3031,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         private async Task<bool> CheckIfTrainerBanned(ulong nid, CancellationToken token)
         {
             string msg;
-            var banResultCFW = RaiderBanList.List.FirstOrDefault(x => x.ID == nid);
+            var banResultCFW = RaiderBanList.Find(nid);
             bool isBanned = banResultCFW != default;
 
             if (isBanned)
