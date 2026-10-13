@@ -11,10 +11,8 @@ namespace SysBot.Pokemon
 {
     public static class RaidExtensions<T> where T : PKM, new()
     {
-        private static readonly HttpClient httpClient = new HttpClient(new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = (sender, cert, chain, sslPolicyErrors) => true
-        })
+        // Every sprite comes from raw.githubusercontent.com, which has a valid certificate.
+        private static readonly HttpClient httpClient = new()
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
