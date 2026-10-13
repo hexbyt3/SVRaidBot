@@ -2,7 +2,6 @@
 using SysBot.Base;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -23,12 +22,12 @@ namespace SysBot.Pokemon
         public async Task VerifyBotbaseVersion(CancellationToken token)
         {
             var data = await SwitchConnection.GetBotbaseVersion(token).ConfigureAwait(false);
-            var version = decimal.TryParse(data, CultureInfo.InvariantCulture, out var v) ? v : 0;
+            var version = ParseBotbaseVersion(data);
             if (version < BotbaseVersion)
             {
                 var protocol = Config.Connection.Protocol;
                 var msg = protocol is SwitchProtocol.WiFi ? "sys-botbase" : "usb-botbase";
-                msg += $" version is not supported. Expected version {BotbaseVersion} or greater, and current version is {version}. Please download the latest version from: ";
+                msg += $" version is not supported. Expected version {BotbaseVersion} or greater, and current version is {data.Trim('\0', '\r', '\n', ' ')}. Please download the latest version from: ";
                 if (protocol is SwitchProtocol.WiFi)
                     msg += "https://github.com/olliz0r/sys-botbase/releases/latest";
                 else

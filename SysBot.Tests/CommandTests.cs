@@ -1,5 +1,6 @@
 using FluentAssertions;
 using SysBot.Base;
+using SysBot.Pokemon;
 using System.Linq;
 using Xunit;
 
@@ -35,6 +36,31 @@ namespace SysBot.Tests
             var convert = Decoder.ConvertHexByteStringToBytes(raw);
             convert.SequenceEqual(expect).Should().BeTrue();
         }
+    }
+
+    public class BotbaseVersionTests
+    {
+        // What getVersion answers in each release since 2.0, oldest first, read from each
+        // project's main.c at its release tags.
+        [Theory]
+        [InlineData("2.0", "2.1", "2.11", "2.2", "2.3", "2.31", "2.4", "2.41", "2.5")] // sys-botbase
+        [InlineData("2.2", "2.3", "2.4", "2.4.1", "2.42", "2.5")]                      // usb-botbase
+        public void RealVersionsSortInReleaseOrder(params string[] released)
+        {
+            var parsed = released.Select(PokeRoutineExecutorBase.ParseBotbaseVersion).ToArray();
+            parsed.Should().BeInAscendingOrder().And.OnlyHaveUniqueItems();
+        }
+
+        [Theory]
+        [InlineData("2.31\n", false)]
+        [InlineData("2.3\n\0", false)]
+        [InlineData("2.4\n", true)]
+        [InlineData("2.4.1\0", true)]
+        [InlineData("2.41\n", true)]
+        [InlineData("2.5\0\0\0\0\0\0", true)]
+        [InlineData("", false)]
+        public void MinimumVersionIsEnforced(string reply, bool supported) =>
+            (PokeRoutineExecutorBase.ParseBotbaseVersion(reply) >= PokeRoutineExecutorBase.BotbaseVersion).Should().Be(supported);
     }
 
     public class UsbReplyTests

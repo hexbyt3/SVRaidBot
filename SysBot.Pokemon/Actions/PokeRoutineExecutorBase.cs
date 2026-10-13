@@ -1,5 +1,6 @@
 ﻿using PKHeX.Core;
 using SysBot.Base;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -8,6 +9,16 @@ namespace SysBot.Pokemon
     public abstract class PokeRoutineExecutorBase : SwitchRoutineExecutor<PokeBotState>
     {
         public const decimal BotbaseVersion = 2.4m;
+
+        // sys-botbase releases went 2.1, 2.11, 2.2, 2.3, 2.31, 2.4, 2.41, 2.5, so the digits after
+        // the dot are a decimal fraction, not a minor number. usb-botbase's FW21 build answers
+        // "2.4.1", which sits between its 2.4 and 2.42.
+        public static decimal ParseBotbaseVersion(string reply)
+        {
+            var parts = reply.Trim('\0', '\r', '\n', ' ').Split('.');
+            var text = parts.Length > 1 ? parts[0] + "." + string.Concat(parts[1..]) : parts[0];
+            return decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var version) ? version : 0;
+        }
 
         protected PokeRoutineExecutorBase(IConsoleBotManaged<IConsoleConnectionAsync> cfg) : base(cfg)
         {
