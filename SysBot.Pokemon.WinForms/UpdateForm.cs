@@ -191,18 +191,8 @@ namespace SysBot.Pokemon.WinForms
             try
             {
                 string batchPath = UpdateScript.PathFor(Environment.ProcessId);
-                File.WriteAllText(batchPath, UpdateScript.Build(Environment.ProcessId, Application.ExecutablePath, downloadedFilePath));
-
-                // Start the update batch file
-                ProcessStartInfo startInfo = new ProcessStartInfo
-                {
-                    FileName = batchPath,
-                    CreateNoWindow = true,
-                    UseShellExecute = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
-
-                Process.Start(startInfo);
+                File.WriteAllText(batchPath, UpdateScript.Build(Environment.ProcessId));
+                Process.Start(UpdateScript.StartInfo(batchPath, Application.ExecutablePath, downloadedFilePath));
 
                 // Exit the current instance
                 Application.Exit();
