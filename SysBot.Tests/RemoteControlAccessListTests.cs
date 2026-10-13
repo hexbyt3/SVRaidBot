@@ -49,7 +49,7 @@ public class RemoteControlAccessListTests
             {
                 list.AddIfNew([new RemoteControlAccess { ID = id++ }]);
                 if (id % 50 == 0)
-                    list.RemoveAll(z => z.ID % 2 == 0);
+                    list.RemoveAll(_ => true);
             }
         });
 
