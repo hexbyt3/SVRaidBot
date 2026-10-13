@@ -1,6 +1,7 @@
 ﻿using Discord;
 using Discord.Commands;
 using Discord.WebSocket;
+using SysBot.Pokemon.Discord.Helpers;
 using SysBot.Base;
 using System;
 using System.Collections.Generic;
@@ -11,7 +12,7 @@ namespace SysBot.Pokemon.Discord
 {
     public class LogModule : ModuleBase<SocketCommandContext>
     {
-        private sealed record LogAction(ulong ChannelID, Action<string, string> Action, string ChannelName);
+        private sealed record LogAction(ulong ChannelID, Action<string, string> Action, string ChannelName, LogBatcher Batcher);
 
         private static readonly Dictionary<ulong, LogAction> Channels = new();
 
@@ -48,24 +49,10 @@ namespace SysBot.Pokemon.Discord
 
         private static void AddLogChannel(ISocketMessageChannel c, ulong cid)
         {
-            void Logger(string msg, string identity)
-            {
-                try
-                {
-                    c.SendMessageAsync(GetMessage(msg, identity));
-                }
-                catch (Exception ex)
-                {
-                    LogUtil.LogSafe(ex, identity);
-                }
-            }
-
-            Action<string, string> l = Logger;
+            var batcher = new LogBatcher(c);
+            Action<string, string> l = (msg, identity) => batcher.Add($"> [{DateTime.Now:HH:mm:ss}] - {identity}: {msg}");
             LogUtil.Forwarders.Add(l);
-            static string GetMessage(string msg, string identity) => $"> [{DateTime.Now:hh:mm:ss}] - {identity}: {msg}";
-
-            var entry = new LogAction(cid, l, c.Name);
-            Channels.Add(cid, entry);
+            Channels.Add(cid, new LogAction(cid, l, c.Name, batcher));
         }
 
         [Command("logInfo")]
@@ -73,8 +60,13 @@ namespace SysBot.Pokemon.Discord
         [RequireSudo]
         public async Task DumpLogInfoAsync()
         {
-            foreach (var c in Channels)
-                await ReplyAsync($"{c.Key} - {c.Value}").ConfigureAwait(false);
+            if (Channels.Count == 0)
+            {
+                await ReplyAsync("Not logging to any channel.").ConfigureAwait(false);
+                return;
+            }
+            var lines = Channels.Values.Select(c => $"#{c.ChannelName} ({c.ChannelID})");
+            await ReplyAsync($"Logging to:\n{string.Join("\n", lines)}").ConfigureAwait(false);
         }
 
         [Command("logClear")]
@@ -85,10 +77,11 @@ namespace SysBot.Pokemon.Discord
             var id = Context.Channel.Id;
             if (!Channels.TryGetValue(id, out var log))
             {
-                await ReplyAsync("Not echoing in this channel.").ConfigureAwait(false);
+                await ReplyAsync("Not logging in this channel.").ConfigureAwait(false);
                 return;
             }
             LogUtil.Forwarders.Remove(log.Action);
+            log.Batcher.Dispose();
             Channels.Remove(Context.Channel.Id);
             SysCordSettings.Settings.LoggingChannels.RemoveAll(z => z.ID == id);
             await ReplyAsync($"Logging cleared from channel: {Context.Channel.Name}").ConfigureAwait(false);
@@ -102,8 +95,9 @@ namespace SysBot.Pokemon.Discord
             foreach (var l in Channels)
             {
                 var entry = l.Value;
-                await ReplyAsync($"Logging cleared from {entry.ChannelName} ({entry.ChannelID}!").ConfigureAwait(false);
+                await ReplyAsync($"Logging cleared from {entry.ChannelName} ({entry.ChannelID})!").ConfigureAwait(false);
                 LogUtil.Forwarders.Remove(entry.Action);
+                entry.Batcher.Dispose();
             }
 
             LogUtil.Forwarders.RemoveAll(y => Channels.Select(x => x.Value.Action).Contains(y));
