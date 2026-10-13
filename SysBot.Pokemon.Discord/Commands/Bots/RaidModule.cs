@@ -191,7 +191,7 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
             ulong nidToBan = playerToBan.Key;
 
             // Check if the NID is already in the ban list.
-            if (Hub.Config.RotatingRaidSV.RaiderBanList.List.Any(x => x.ID == nidToBan))
+            if (Hub.Config.RotatingRaidSV.RaiderBanList.Contains(nidToBan))
             {
                 await ReplyAsync($"Player with OT '{ot}' is already banned.");
                 return;
@@ -1238,15 +1238,15 @@ namespace SysBot.Pokemon.Discord.Commands.Bots
         [RequireSudo]
         public async Task UnbanRotatingRaider([Summary("Removes the specificed NID from the banlist for Raids in SV.")] string nid)
         {
-            var list = Hub.Config.RotatingRaidSV.RaiderBanList.List.ToArray();
-            string msg = $"{Context.User.Mention} no user found with that NID.";
-            for (int i = 0; i < list.Length; i++)
-                if ($"{list[i].ID}".Equals(nid))
-                {
-                    msg = $"{Context.User.Mention} user {list[i].Name} - {list[i].ID} has been unbanned.";
-                    Hub.Config.RotatingRaidSV.RaiderBanList.List.ToList().Remove(list[i]);
-                }
-            await ReplyAsync(msg).ConfigureAwait(false);
+            var banList = Hub.Config.RotatingRaidSV.RaiderBanList;
+            if (!ulong.TryParse(nid, out var id) || banList.Find(id) is not { } banned)
+            {
+                await ReplyAsync($"{Context.User.Mention} no user found with that NID.").ConfigureAwait(false);
+                return;
+            }
+
+            banList.RemoveAll(z => z.ID == id);
+            await ReplyAsync($"{Context.User.Mention} user {banned.Name} - {banned.ID} has been unbanned.").ConfigureAwait(false);
         }
 
         private RemoteControlAccess GetReference(ulong id, string name, string comment) => new()

@@ -21,7 +21,7 @@ namespace SysBot.Pokemon.Discord
 
         public bool CanUseSudo(IEnumerable<string> roles) => roles.Any(SudoRoles.Contains);
 
-        public bool CanUseCommandChannel(ulong channel) => (WhitelistedChannels.List.Count == 0 && WhitelistedChannels.AllowIfEmpty) || WhitelistedChannels.Contains(channel);
+        public bool CanUseCommandChannel(ulong channel) => (WhitelistedChannels.Count == 0 && WhitelistedChannels.AllowIfEmpty) || WhitelistedChannels.Contains(channel);
 
         public bool CanUseCommandUser(ulong uid) => !BlacklistedUsers.Contains(uid);
 
@@ -30,7 +30,7 @@ namespace SysBot.Pokemon.Discord
         public bool GetHasRoleAccess(string type, IEnumerable<string> roles)
         {
             var set = GetSet(type);
-            return (set.AllowIfEmpty && set.List.Count == 0) || roles.Any(set.Contains);
+            return (set.AllowIfEmpty && set.Count == 0) || roles.Any(set.Contains);
         }
 
         private RemoteControlAccessList GetSet(string type) => type switch
