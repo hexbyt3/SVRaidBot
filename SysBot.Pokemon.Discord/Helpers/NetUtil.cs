@@ -7,10 +7,12 @@ namespace SysBot.Pokemon.Discord
 {
     public static class NetUtil
     {
+        // One client for the whole program; a new one per download leaves sockets in TIME_WAIT.
+        public static readonly HttpClient Client = new();
+
         public static async Task<byte[]> DownloadFromUrlAsync(string url)
         {
-            using var client = new HttpClient();
-            return await client.GetByteArrayAsync(url).ConfigureAwait(false);
+            return await Client.GetByteArrayAsync(url).ConfigureAwait(false);
         }
 
         public static async Task<Download<PKM>> DownloadPKMAsync(IAttachment att)

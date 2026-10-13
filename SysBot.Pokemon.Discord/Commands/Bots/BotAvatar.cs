@@ -2,7 +2,6 @@ using Discord;
 using Discord.Commands;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
 using System.Threading.Tasks;
 
 namespace SysBot.Pokemon.Discord
@@ -27,8 +26,7 @@ namespace SysBot.Pokemon.Discord
                 return;
             }
 
-            using var httpClient = new HttpClient();
-            var imageBytes = await httpClient.GetByteArrayAsync(attachment.Url);
+            var imageBytes = await NetUtil.DownloadFromUrlAsync(attachment.Url);
 
             using var ms = new MemoryStream(imageBytes);
             var image = new Image(ms);
