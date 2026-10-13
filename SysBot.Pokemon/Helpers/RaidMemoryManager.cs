@@ -79,12 +79,6 @@ public class RaidMemoryManager(ISwitchConnectionAsync connection, ulong raidBloc
     /// <param name="index">The global raid index</param>
     /// <param name="token">Cancellation token</param>
     /// <returns>The seed value at the specified index, or 0 if the raid is completed</returns>
-    /// <summary>
-    /// Reads the seed value at a specific raid index.
-    /// </summary>
-    /// <param name="index">The global raid index</param>
-    /// <param name="token">Cancellation token</param>
-    /// <returns>The seed value at the specified index, or 0 if the raid is completed</returns>
     public async Task<uint> ReadSeedAtIndex(int index, CancellationToken token)
     {
         var (map, slot) = FromGlobalIndex(index);
