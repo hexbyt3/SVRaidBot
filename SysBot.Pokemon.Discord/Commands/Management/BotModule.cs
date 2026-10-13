@@ -1,10 +1,8 @@
 ﻿using Discord;
 using Discord.Commands;
-using Newtonsoft.Json.Linq;
 using PKHeX.Core;
-using SysBot.Pokemon.SV.BotRaid.Helpers;
+using SysBot.Base;
 using System;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -30,24 +28,13 @@ namespace SysBot.Pokemon.Discord
             await ReplyAsync(Format.Code(lines)).ConfigureAwait(false);
         }
 
-        private string GetBotIPFromJsonConfig()
+        // One Switch per program, so the runner's only bot is the one to act on.
+        private async Task<BotSource<PokeBotState>?> GetBotAsync()
         {
-            try
-            {
-                // Read the file and parse the JSON
-                var jsonData = File.ReadAllText(SVRaidBot.ConfigPath);
-                var config = JObject.Parse(jsonData);
-
-                // Access the IP address from the first bot in the Bots array
-                var ip = config["Bots"]![0]!["Connection"]!["IP"]!.ToString();
-                return ip;
-            }
-            catch (Exception ex)
-            {
-                // Handle any errors that occur during reading or parsing the file
-                Console.WriteLine($"Error reading config file: {ex.Message}");
-                return "192.168.1.1"; // Default IP if error occurs
-            }
+            var bot = SysCord<T>.Runner.Bots.FirstOrDefault();
+            if (bot == null)
+                await ReplyAsync("No bot is configured.").ConfigureAwait(false);
+            return bot;
         }
 
         private static string GetDetailedSummary(PokeRoutineExecutorBase z)
@@ -60,13 +47,8 @@ namespace SysBot.Pokemon.Discord
         [RequireSudo]
         public async Task StartBotAsync()
         {
-            string ip = GetBotIPFromJsonConfig();
-            var bot = SysCord<T>.Runner.GetBot(ip);
-            if (bot == null)
-            {
-                await ReplyAsync($"No bot has that IP address ({ip}).").ConfigureAwait(false);
+            if (await GetBotAsync().ConfigureAwait(false) is not { } bot)
                 return;
-            }
 
             bot.Start();
             await ReplyAsync($"Bot has been started.").ConfigureAwait(false);
@@ -77,13 +59,8 @@ namespace SysBot.Pokemon.Discord
         [RequireSudo]
         public async Task StopBotAsync()
         {
-            string ip = GetBotIPFromJsonConfig();
-            var bot = SysCord<T>.Runner.GetBot(ip);
-            if (bot == null)
-            {
-                await ReplyAsync($"No bot has that IP address ({ip}).").ConfigureAwait(false);
+            if (await GetBotAsync().ConfigureAwait(false) is not { } bot)
                 return;
-            }
 
             bot.Stop();
             await ReplyAsync($"Bot has been stopped.").ConfigureAwait(false);
@@ -95,13 +72,8 @@ namespace SysBot.Pokemon.Discord
         [RequireSudo]
         public async Task IdleBotAsync()
         {
-            string ip = GetBotIPFromJsonConfig();
-            var bot = SysCord<T>.Runner.GetBot(ip);
-            if (bot == null)
-            {
-                await ReplyAsync($"No bot has that IP address ({ip}).").ConfigureAwait(false);
+            if (await GetBotAsync().ConfigureAwait(false) is not { } bot)
                 return;
-            }
 
             bot.Pause();
             await ReplyAsync($"Bot has been set to idle.").ConfigureAwait(false);
@@ -112,13 +84,8 @@ namespace SysBot.Pokemon.Discord
         [RequireSudo]
         public async Task ChangeTaskAsync([Summary("Routine enum name")] PokeRoutineType task)
         {
-            string ip = GetBotIPFromJsonConfig();
-            var bot = SysCord<T>.Runner.GetBot(ip);
-            if (bot == null)
-            {
-                await ReplyAsync($"No bot has that IP address ({ip}).").ConfigureAwait(false);
+            if (await GetBotAsync().ConfigureAwait(false) is not { } bot)
                 return;
-            }
 
             bot.Bot.Config.Initialize(task);
             await ReplyAsync($"Bot has changed its routine to {task}.").ConfigureAwait(false);
@@ -129,13 +96,8 @@ namespace SysBot.Pokemon.Discord
         [RequireSudo]
         public async Task RestartBotAsync()
         {
-            string ip = GetBotIPFromJsonConfig();
-            var bot = SysCord<T>.Runner.GetBot(ip);
-            if (bot == null)
-            {
-                await ReplyAsync($"No bot has that IP address ({ip}).").ConfigureAwait(false);
+            if (await GetBotAsync().ConfigureAwait(false) is not { } bot)
                 return;
-            }
 
             var c = bot.Bot.Connection;
             c.Reset();

@@ -58,6 +58,7 @@ namespace SysBot.Pokemon.Discord
         [Alias("bye")]
         [Summary("Leaves the current server.")]
         [RequireOwner]
+        [RequireContext(ContextType.Guild)]
         public async Task Leave()
         {
             await ReplyAsync("Goodbye.").ConfigureAwait(false);
