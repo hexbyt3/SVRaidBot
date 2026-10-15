@@ -91,6 +91,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         private int _winCount;
         private int _lossCount;
         private int _seedIndexToReplace = -1;
+        private bool _seedEverInjected;
         public static GameProgress GameProgress { get; private set; }
         public static bool? CurrentSpawnsEnabled { get; private set; }
         private int _storyProgress;
@@ -1333,7 +1334,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             _seedMismatchCount = 0;
             var raid = _settings.ActiveRaids[_currentRaidIndex];
-            var problem = $"The den at index {_seedIndexToReplace} ({CurrentMap}) still didn't hold {RaidName(raid)}'s seed {raid.Seed} after loading it twice. Skipping this raid.";
+            var problem = $"The den at index {_seedIndexToReplace} ({CurrentMap}) still didn't hold {RaidName(raid)}'s seed {raid.Seed} after saving and loading it three times. Skipping this raid.";
             Log(problem);
             EchoUtil.AlertOwner($"The raid bot on the Switch at {Connection.Name} could not load a raid. {problem} " +
                 "This should not happen; please send the log to the developer.");
@@ -1828,6 +1829,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 }
 
                 _seedIndexToReplace = index;
+                _seedEverInjected = true;
                 Log($"Successfully injected seed {seed:X8} at index {index}");
 
                 await TeleportToInjectedDenLocation(index, crystalType, denIdentifier, token);
@@ -2721,14 +2723,14 @@ namespace SysBot.Pokemon.SV.BotRaid
             if (!seedFound)
             {
                 // Going online hands the game the current dens, and a new day on the
-                // Switch rebuilds them, so a den can lose the seed it was given. One
-                // reload puts it back; a second miss means something is broken.
-                if (++_seedMismatchCount >= 2)
+                // Switch rebuilds them, so a den can lose the seed it was given. Reloads
+                // put it back; a third miss means something is broken.
+                if (++_seedMismatchCount >= 3)
                 {
                     await GiveUpOnRaid(token).ConfigureAwait(false);
                     return 2;
                 }
-                Log(_seedIndexToReplace == -1
+                Log(!_seedEverInjected
                     ? "No seed has been loaded since the bot started. Loading this raid's seed into the den here."
                     : "The den lost this raid's seed when the game went online or the Switch started a new day. Loading the seed again.");
 
@@ -2736,6 +2738,12 @@ namespace SysBot.Pokemon.SV.BotRaid
                 await LogPlayerLocation(token).ConfigureAwait(false);
                 if (uint.TryParse(_denHexSeed, NumberStyles.AllowHexSpecifier, null, out var nearestSeed))
                     await FindSeedIndexInRaids(nearestSeed, token).ConfigureAwait(false);
+
+                // A day that turned over while the game was running is only in memory. Left
+                // unsaved, the reload starts a new day again and rebuilds the dens over the
+                // seed (Abra, 10/14 17:01). Saving first makes the new day stick.
+                if (_seedEverInjected)
+                    await SaveGame(_hub.Config, token).ConfigureAwait(false);
 
                 await Task.Delay(4_000, token).ConfigureAwait(false);
                 await RestartGameWithSeed(token).ConfigureAwait(false);
@@ -5453,12 +5461,12 @@ ALwkMx63fBR0pKs+jJ8DcFrcJR50aVv1jfIAQpPIK5G6Dk/4hmV12Hdu5sSGLl40
                 await RecoverToOverworld(token).ConfigureAwait(false);
             }
 
-            // Now do the actual save by opening X menu and pressing L
+            // X then L is the online toggle, so this used to reconnect instead of saving.
+            // R in the X menu asks to save; A says yes, the next A closes "saved".
             await Click(X, 2_000, token).ConfigureAwait(false);
-            await Click(L, 5_000 + config.Timings.ExtraTimeConnectOnline, token).ConfigureAwait(false);
-
-            // Wait a bit to ensure save completes, then return to overworld
-            await Task.Delay(2_000, token).ConfigureAwait(false);
+            await Click(R, 2_000, token).ConfigureAwait(false);
+            await Click(A, 4_000, token).ConfigureAwait(false);
+            await Click(A, 1_000, token).ConfigureAwait(false);
             await RecoverToOverworld(token).ConfigureAwait(false);
 
             Log("Game saved successfully.");
