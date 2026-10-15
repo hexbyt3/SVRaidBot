@@ -1165,10 +1165,10 @@ namespace SysBot.Pokemon.SV.BotRaid
         {
             await RegroupFromBannedUser(token).ConfigureAwait(false);
 
-            if (!await IsOnOverworld(_overworldOffset, token).ConfigureAwait(false))
+            if (!await RecoverToOverworld(token, TimeSpan.FromSeconds(30)).ConfigureAwait(false))
             {
-                Log("Something went wrong, attempting to recover.");
-                await ReOpenGame(_hub.Config, token).ConfigureAwait(false);
+                Log("Could not leave the lobby, restarting the game.");
+                await RestartGameWithSeed(token).ConfigureAwait(false);
                 return;
             }
 
@@ -1259,9 +1259,10 @@ namespace SysBot.Pokemon.SV.BotRaid
                     if (CurrentWebRequest is { } dipped)
                         dipped.OutcomeOverride = ("missed", "Everyone left the lobby before the battle started. You can request it again now.");
 
-                    // No battle was fought, so it is neither a win nor a loss.
-                    await ReOpenGame(_hub.Config, token);
-                    await FinalizeRaidCompletion(false, token);
+                    // No battle was fought, so it is neither a win nor a loss. The bot is
+                    // still in the battle, so close the game rather than wait for the overworld.
+                    await CloseGame(_hub.Config, token).ConfigureAwait(false);
+                    await FinalizeRaidCompletion(false, token, gameClosed: true).ConfigureAwait(false);
                     return false;
                 }
 
@@ -1604,22 +1605,26 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// <summary>
         /// Finalizes raid completion, updates counters, and prepares for the next raid
         /// </summary>
-        private async Task FinalizeRaidCompletion(bool battled, CancellationToken token)
+        private async Task FinalizeRaidCompletion(bool battled, CancellationToken token, bool gameClosed = false)
         {
-            Log("Returning to overworld...");
-
-            int attempts = 0;
-            while (!await IsOnOverworld(_overworldOffset, token).ConfigureAwait(false) && attempts < 10)
+            bool backOnOverworld = false;
+            if (!gameClosed)
             {
-                await Click(A, 2_000, token).ConfigureAwait(false);
-                attempts++;
-            }
+                Log("Returning to overworld...");
 
-            bool backOnOverworld = await RecoverToOverworld(token).ConfigureAwait(false);
-            if (!backOnOverworld)
-                Log("Failed to return to overworld after the raid, so its result can't be read. Restarting the game for the next raid.");
-            else if (battled)
-                await CountRaids(token).ConfigureAwait(false);
+                int attempts = 0;
+                while (!await IsOnOverworld(_overworldOffset, token).ConfigureAwait(false) && attempts < 10)
+                {
+                    await Click(A, 2_000, token).ConfigureAwait(false);
+                    attempts++;
+                }
+
+                backOnOverworld = await RecoverToOverworld(token).ConfigureAwait(false);
+                if (!backOnOverworld)
+                    Log("Failed to return to overworld after the raid, so its result can't be read. Restarting the game for the next raid.");
+                else if (battled)
+                    await CountRaids(token).ConfigureAwait(false);
+            }
 
             // The lobby was hosted, so a requested raid is done and must not be hosted a second time.
             RemoveTemporaryRaidIfNeeded("completed");
@@ -1634,8 +1639,13 @@ namespace SysBot.Pokemon.SV.BotRaid
                 await EnqueueEmbed(null, "", false, false, true, false, token).ConfigureAwait(false);
                 await Task.Delay(0_500, token).ConfigureAwait(false);
             }
-            await CloseGame(_hub.Config, token).ConfigureAwait(false);
+            if (!gameClosed)
+                await CloseGame(_hub.Config, token).ConfigureAwait(false);
             await StartGameRaid(_hub.Config, token).ConfigureAwait(false);
+
+            // The up-next embed reads the game, so it waits until the game is back.
+            if (gameClosed)
+                await EnqueueEmbed(null, "", false, false, true, false, token).ConfigureAwait(false);
 
             if (_settings.RaidSettings.KeepDaySeed)
                 await OverrideTodaySeed(token).ConfigureAwait(false);
@@ -2650,11 +2660,9 @@ namespace SysBot.Pokemon.SV.BotRaid
                 (bool valid, ulong freshOffset) = await ValidatePointerAll(Offsets.OverworldPointer, token).ConfigureAwait(false);
                 if (valid)
                 {
-                    if (await IsOnOverworld(freshOffset, token).ConfigureAwait(false))
-                    {
-                        _overworldOffset = freshOffset;
-                    }
-                    else
+                    _overworldOffset = freshOffset;
+                    if (!await IsOnOverworld(freshOffset, token).ConfigureAwait(false)
+                        && !await RecoverToOverworld(token, TimeSpan.FromSeconds(30)).ConfigureAwait(false))
                     {
                         Log("Not on overworld (validated pointer check), reopening game.");
                         await RestartGameWithSeed(token).ConfigureAwait(false);
@@ -2865,7 +2873,7 @@ namespace SysBot.Pokemon.SV.BotRaid
         /// <summary>
         /// Recovers to the overworld from various game states
         /// </summary>
-        private async Task<bool> RecoverToOverworld(CancellationToken token)
+        private async Task<bool> RecoverToOverworld(CancellationToken token, TimeSpan? limit = null)
         {
             if (await IsOnOverworld(_overworldOffset, token).ConfigureAwait(false))
             {
@@ -2874,7 +2882,8 @@ namespace SysBot.Pokemon.SV.BotRaid
 
             // B presses get out of any menu within a minute or two. Past three minutes the
             // game is stuck, and a restart is quicker than the ten minutes this used to take.
-            var deadline = DateTime.Now.AddMinutes(3);
+            var allowed = limit ?? TimeSpan.FromMinutes(3);
+            var deadline = DateTime.Now + allowed;
             var attempts = 0;
             while (DateTime.Now < deadline)
             {
@@ -2885,7 +2894,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 if (valid)
                     _overworldOffset = freshOffset;
 
-                for (int i = 0; i < 20; i++)
+                for (int i = 0; i < 20 && DateTime.Now < deadline; i++)
                 {
                     if (await IsOnOverworld(_overworldOffset, token).ConfigureAwait(false))
                     {
@@ -2897,7 +2906,7 @@ namespace SysBot.Pokemon.SV.BotRaid
                 }
             }
 
-            Log($"Could not get back to the overworld within 3 minutes ({attempts} attempts).");
+            Log($"Could not get back to the overworld within {allowed.TotalSeconds:0} seconds ({attempts} attempts).");
             return false;
         }
 
@@ -3311,10 +3320,21 @@ namespace SysBot.Pokemon.SV.BotRaid
             await Click(A, 3_000, token).ConfigureAwait(false);
             await Click(B, 1_000, token).ConfigureAwait(false);
 
-            while (!await IsOnOverworld(_overworldOffset, token))
+            // The overworld flag can read true for a moment while the lobby is still closing,
+            // so it has to hold across two checks. A lobby that won't close is left to LeaveLobby.
+            var deadline = DateTime.Now.AddMinutes(2);
+            int settled = 0;
+            while (settled < 2 && DateTime.Now < deadline)
             {
+                if (await IsOnOverworld(_overworldOffset, token).ConfigureAwait(false))
+                {
+                    if (++settled < 2)
+                        await Task.Delay(3_000, token).ConfigureAwait(false);
+                    continue;
+                }
+                settled = 0;
                 for (int i = 0; i < 8; i++)
-                    await Click(B, 1000, token);
+                    await Click(B, 1_000, token).ConfigureAwait(false);
             }
         }
 
