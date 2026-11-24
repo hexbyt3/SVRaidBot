@@ -45,16 +45,14 @@ namespace SysBot.Pokemon.WinForms
                 return;
             string discordName = string.Empty;
 
-            // Update checker - check silently on startup; a required update blocks loading any bot
+            // Update checker - a required update installs itself before any bot loads. If it can't,
+            // the bots load anyway and the hourly check tries again later.
             try
             {
                 var (updateAvailable, updateRequired, newVersion) = await UpdateChecker.CheckForUpdatesAsync(forceShow: false);
                 hasUpdate = updateAvailable;
-                if (updateRequired)
-                {
-                    ShowRequiredUpdate(newVersion);
+                if (updateRequired && await InstallRequiredUpdate(newVersion))
                     return;
-                }
             }
             catch { /* Ignore update check errors on startup */ }
 
@@ -115,6 +113,7 @@ namespace SysBot.Pokemon.WinForms
             StartUpdateCheckTimer();
 
             LogUtil.LogInfo($"Bot initialization complete", "System");
+            ResumeAfterUpdate();
             _ = Task.Run(() =>
             {
                 try
@@ -484,27 +483,118 @@ namespace SysBot.Pokemon.WinForms
                 {
                     var (updateAvailable, updateRequired, newVersion) = await UpdateChecker.CheckForUpdatesAsync(forceShow: false);
                     hasUpdate = updateAvailable;
-                    if (updateRequired && !_requiredUpdateShown)
-                    {
-                        LogUtil.LogInfo($"Required update {newVersion} is out. Stopping the bots until it is installed.", "Update");
-                        RunningEnvironment.StopAll();
-                        ShowRequiredUpdate(newVersion);
-                    }
+                    if (updateRequired)
+                        await InstallRequiredUpdate(newVersion);
                 }
                 catch { /* Ignore update check errors */ }
             };
         }
 
-        private bool _requiredUpdateShown;
+        private bool _installingRequired;
+        private static string UpdateNotePath => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(Program.ConfigPath))!, "update-note.txt");
+        private static readonly TimeSpan RaidWait = TimeSpan.FromMinutes(45);
 
-        private void ShowRequiredUpdate(string newVersion)
+        /// <summary>
+        /// Installs a required update with nobody at the PC: downloads while the bots keep
+        /// hosting, lets the raid in progress end, swaps the program and starts hosting again.
+        /// </summary>
+        /// <returns>True when the program is closing to update</returns>
+        private async Task<bool> InstallRequiredUpdate(string newVersion)
         {
-            _requiredUpdateShown = true;
-            using (var form = new UpdateForm(true, newVersion, true))
-                form.ShowDialog(this);
-            // Either the installer is taking over or the host skipped a required update.
-            isExiting = true;
-            Application.Exit();
+            if (_installingRequired || IsUpdating || UpdateNote.Read(UpdateNotePath)?.BlocksRetry(newVersion, DateTime.UtcNow) == true)
+                return false;
+
+            _installingRequired = true;
+            string? download = null;
+            bool paused = false;
+            try
+            {
+                var release = await UpdateChecker.GetLatestAsync();
+                if (release == null)
+                    return false;
+
+                LogUtil.LogInfo($"Required update {release.Tag} is out. Downloading it now.", "Update");
+                download = await UpdateInstaller.DownloadAsync(release);
+
+                // A bot the host paused or stopped stays that way after the update.
+                bool hosting = BotSources().Any(b => b.IsRunning && !b.IsStopping && !b.IsPaused);
+                if (hosting)
+                {
+                    LogUtil.LogInfo($"Installing {release.Tag} after the current raid.", "Update");
+                    paused = true;
+                    await WaitForRaidsToEnd();
+                    hosting = BotSources().Any(b => b.IsRunning && !b.IsStopping);
+                }
+                if (IsDisposed || IsUpdating)
+                    return false;
+
+                // Keeps a resume still owed from an update just before this one.
+                bool resume = hosting || UpdateNote.Read(UpdateNotePath)?.ShouldResume(DateTime.UtcNow) == true;
+                new UpdateNote(newVersion, DateTime.UtcNow, resume).Write(UpdateNotePath);
+                UpdateInstaller.Launch(release, download);
+                download = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"Required update {newVersion} could not be installed: {ex.Message}", "Update");
+                // The bots were only parked for the swap; go back to hosting.
+                if (paused && !IsDisposed)
+                    SendAll(BotControlCommand.Resume);
+                return false;
+            }
+            finally
+            {
+                if (download != null)
+                    UpdateInstaller.TryDelete(download);
+                _installingRequired = false;
+            }
+        }
+
+        private async Task WaitForRaidsToEnd()
+        {
+            var deadline = DateTime.UtcNow + RaidWait;
+            while (DateTime.UtcNow < deadline && !IsDisposed)
+            {
+                bool busy = false;
+                foreach (var source in BotSources())
+                {
+                    if (!source.IsRunning)
+                        continue;
+                    if (source.Bot is SV.BotRaid.RotatingRaidBotSV { IsParked: true })
+                        continue;
+                    busy = true;
+                    // Every pass, because a crash restart clears the pause.
+                    source.Pause();
+                }
+                if (!busy)
+                    return;
+                await Task.Delay(2_000);
+            }
+            LogUtil.LogInfo("The raid did not end in time; updating anyway.", "Update");
+        }
+
+        private void ResumeAfterUpdate()
+        {
+            var note = UpdateNote.Read(UpdateNotePath);
+            if (note is not { Resume: true })
+                return;
+
+            bool resume = note.ShouldResume(DateTime.UtcNow);
+            try
+            {
+                (note with { Resume = false }).Write(UpdateNotePath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                LogUtil.LogError($"Could not update {UpdateNotePath}: {ex.Message}", "Update");
+            }
+            if (!resume || Bots.Count == 0)
+                return;
+
+            LogUtil.LogInfo($"Updated; now running {SVRaidBot.Version}. Starting the bots again.", "Update");
+            RunningEnvironment.InitializeStart();
+            SendAll(BotControlCommand.Start);
         }
 
         private void RefreshMap_Click(object sender, EventArgs e)

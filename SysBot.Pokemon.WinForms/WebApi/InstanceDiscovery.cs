@@ -61,7 +61,9 @@ public static class InstanceDiscovery
         {
             try
             {
-                File.Delete(Path.Combine(folder, FileName(Environment.ProcessId)));
+                // An update at startup closes the program before any port file was written.
+                if (Directory.Exists(folder))
+                    File.Delete(Path.Combine(folder, FileName(Environment.ProcessId)));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

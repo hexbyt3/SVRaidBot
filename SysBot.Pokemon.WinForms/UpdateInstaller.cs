@@ -28,8 +28,21 @@ namespace SysBot.Pokemon.WinForms
             try
             {
                 LogUtil.LogInfo($"Downloading {release.Tag}...", "Update");
-                var downloadedPath = await DownloadAsync(release);
+                Launch(release, await DownloadAsync(release));
+            }
+            catch
+            {
+                Main.IsUpdating = false;
+                throw;
+            }
+        }
 
+        /// <summary>Starts the swap script for a finished download and closes the program.</summary>
+        public static void Launch(UpdateChecker.Release release, string downloadedPath)
+        {
+            Main.IsUpdating = true;
+            try
+            {
                 string batchPath = UpdateScript.PathFor(Environment.ProcessId);
                 File.WriteAllText(batchPath, UpdateScript.Build(Environment.ProcessId));
                 using (Process.Start(UpdateScript.StartInfo(batchPath, Application.ExecutablePath, downloadedPath)))
@@ -61,8 +74,11 @@ namespace SysBot.Pokemon.WinForms
             }
         }
 
-        private static async Task<string> DownloadAsync(UpdateChecker.Release release)
+        public static async Task<string> DownloadAsync(UpdateChecker.Release release)
         {
+            if (string.IsNullOrWhiteSpace(release.DownloadUrl))
+                throw new InvalidOperationException($"Release {release.Tag} has no program to download.");
+
             string tempPath = Path.Combine(Path.GetTempPath(), $"SVRaidBot_{Guid.NewGuid()}.exe");
             try
             {
@@ -96,7 +112,7 @@ namespace SysBot.Pokemon.WinForms
             }
         }
 
-        private static void TryDelete(string path)
+        public static void TryDelete(string path)
         {
             try
             {

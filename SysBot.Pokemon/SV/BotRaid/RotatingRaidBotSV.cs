@@ -128,6 +128,10 @@ namespace SysBot.Pokemon.SV.BotRaid
         private bool _restartRequired;
         private const int MaxRebootsWithoutRaid = 5;
         private volatile bool _isPaused = false;
+        private volatile bool _parked;
+
+        /// <summary>Paused and between raids, so stopping now costs nobody a raid.</summary>
+        public bool IsParked => _parked && _isPaused;
 
         private static readonly WebRaidRequestClient WebRequests = new(msg => LogUtil.LogInfo(msg, "GenPKM"));
         private DateTime _nextWebClaimAllowed = DateTime.MinValue;
@@ -647,9 +651,17 @@ namespace SysBot.Pokemon.SV.BotRaid
                             Log("Bot is paused. Waiting for resume command...");
 
                             // Resume relaunches the bot, so a pause only ends when this loop is canceled.
-                            while (_isPaused && !token.IsCancellationRequested)
+                            _parked = true;
+                            try
                             {
-                                await Task.Delay(1000, token).ConfigureAwait(false);
+                                while (_isPaused && !token.IsCancellationRequested)
+                                {
+                                    await Task.Delay(1000, token).ConfigureAwait(false);
+                                }
+                            }
+                            finally
+                            {
+                                _parked = false;
                             }
 
                             continue;
