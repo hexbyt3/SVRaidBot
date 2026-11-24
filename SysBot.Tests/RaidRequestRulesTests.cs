@@ -16,6 +16,8 @@ public class RaidRequestRulesTests
     [InlineData(-1, 6)]
     [InlineData(1, 6)]
     [InlineData(2, 6)]
+    [InlineData(2, 5)]
+    [InlineData(1, 2)]
     [InlineData(5, 0)]
     [InlineData(5, 9)]
     [InlineData(6, 5)]
@@ -26,6 +28,10 @@ public class RaidRequestRulesTests
     }
 
     [Theory]
+    [InlineData(1, 3)]
+    [InlineData(2, 3)]
+    [InlineData(1, 4)]
+    [InlineData(2, 4)]
     [InlineData(3, 3)]
     [InlineData(5, 5)]
     [InlineData(6, 6)]

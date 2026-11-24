@@ -68,6 +68,10 @@ namespace SysBot.Tests
         [InlineData(6, 6, true)]
         [InlineData(7, 6, true)]
         [InlineData(2, 6, false)]
+        [InlineData(2, 5, false)]
+        [InlineData(1, 3, true)]
+        [InlineData(2, 4, true)]
+        [InlineData(0, 3, false)]
         [InlineData(3, 2, false)]
         public void StarsMustFitStoryProgress(int stars, int progress, bool fits) =>
             WebRaidRules.StarsFitProgress(stars, progress).Should().Be(fits);

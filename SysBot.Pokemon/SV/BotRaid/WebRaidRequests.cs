@@ -295,13 +295,13 @@ namespace SysBot.Pokemon.SV.BotRaid
         public static bool IsValidSeed(string? seed) =>
             seed is { Length: 8 } && uint.TryParse(seed, System.Globalization.NumberStyles.AllowHexSpecifier, null, out _);
 
-        /// <summary>Same matrix as the Discord request command: story progress 3-6, 3★ minimum.</summary>
+        /// <summary>Same matrix as the Discord request command: the star counts a den can roll at story progress 3-6. 1★ and 2★ only exist at 3 and 4.</summary>
         public static bool StarsFitProgress(int stars, int storyProgress) => storyProgress switch
         {
             6 => stars is >= 3 and <= 7,
             5 => stars is >= 3 and <= 5,
-            4 => stars is >= 3 and <= 4,
-            3 => stars == 3,
+            4 => stars is >= 1 and <= 4,
+            3 => stars is >= 1 and <= 3,
             _ => false,
         };
 

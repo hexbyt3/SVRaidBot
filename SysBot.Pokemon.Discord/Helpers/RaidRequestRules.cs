@@ -21,8 +21,8 @@ public static class RaidRequestRules
             return "Invalid raid level. Please enter a level between 1 and 7.";
         if (storyProgressLevel is < 1 or > 6)
             return "Invalid story progress level. Please enter a value between 1 and 6.";
-        if (level < 3)
-            return $"{level}★ raids can't be hosted. Please pick a raid from 3★ to 7★.";
+        if (level < 3 && !WebRaidRules.StarsFitProgress(level, storyProgressLevel))
+            return $"{level}★ raids only appear at story progress 3 or 4. Please use one of those.";
         if (!WebRaidRules.StarsFitProgress(level, storyProgressLevel))
         {
             return $"The selected raid difficulty level ({level}★) is not compatible with your current story progress. " +
